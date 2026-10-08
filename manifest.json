@@ -1,0 +1,16 @@
+{
+  "name": "AgendaMia",
+  "short_name": "AgendaMia",
+  "description": "La tua agenda personale, tutto sul tuo dispositivo",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#6c63ff",
+  "orientation": "portrait-primary",
+  "lang": "it",
+  "icons": [
+    { "src": "./icons/icon-96.png",  "sizes": "96x96",   "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

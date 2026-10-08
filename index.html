@@ -1,0 +1,3681 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}
+/* notif time button (replaces native time input) */
+.notif-time-btn {
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--fg);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 60px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.notif-time-btn:focus { outline: none; border-color: var(--accent); }
+
+</style></head><body>
+<title>AgendaMe v10</title>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AgendaMia">
+<meta name="theme-color" content="#5b6af0">
+<link rel="manifest" href="manifest.json">
+<script>
+// Registra service worker (solo HTTPS / localhost)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => { window._swReg = reg; scheduleAllNotifications(); })
+      .catch(e => console.warn('SW non registrato:', e));
+  });
+}
+// ============================================================
+// BENVENUTO + PWA + NOTIFICHE LOCALI
+// ============================================================
+
+let _deferredInstallPrompt = null;
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  document.getElementById('install-box').style.display = '';
+});
+
+function installPWA() {
+  if (!_deferredInstallPrompt) return;
+  _deferredInstallPrompt.prompt();
+  _deferredInstallPrompt.userChoice.then(() => {
+    _deferredInstallPrompt = null;
+    document.getElementById('install-box').style.display = 'none';
+  });
+}
+
+function rilevaTipoDispositivo() {
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  const isAndroid = /Android/.test(ua);
+  const isChrome = /Chrome/.test(ua) && !/Edg|OPR/.test(ua);
+  return { isIOS, isAndroid, isChrome };
+}
+
+function inizializzaBenvenuto() {
+  const { isIOS, isAndroid, isChrome } = rilevaTipoDispositivo();
+  const icon = document.getElementById('notif-compat-icon');
+  const title = document.getElementById('notif-compat-title');
+  const msg = document.getElementById('notif-compat-msg');
+
+  if (isIOS) {
+    icon.textContent = '🍎';
+    title.textContent = 'iPhone / iPad rilevato';
+    msg.innerHTML = 'Su iOS le notifiche funzionano <strong>solo con l'app aperta</strong>.<br><br>'
+      + 'Per la migliore esperienza: tocca <strong>Condividi → Aggiungi a schermata Home</strong> in Safari.';
+  } else if (isAndroid && isChrome) {
+    icon.textContent = '🔔';
+    title.textContent = 'Notifiche complete disponibili';
+    msg.innerHTML = 'Su Android con Chrome puoi ricevere notifiche <strong>anche con il telefono in standby</strong>.<br><br>'
+      + 'Installa l'app per attivare le notifiche.';
+  } else {
+    icon.textContent = '⚠️';
+    title.textContent = 'Browser non ottimale';
+    msg.innerHTML = 'Per le notifiche usa <strong>Chrome su Android</strong>.<br>'
+      + 'Su altri browser le notifiche funzionano solo con l'app aperta.';
+  }
+}
+
+function avviaApp() {
+  // Chiedi permesso notifiche se disponibile
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission().then(perm => {
+      console.log('Permesso notifiche:', perm);
+      scheduleAllNotifications();
+    });
+  }
+  localStorage.setItem('agendamia_onboarding_done', '1');
+  goTo('home');
+}
+
+// ============================================================
+// SCHEDULING NOTIFICHE
+// ============================================================
+
+function scheduleAllNotifications() {
+  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+    // SW non ancora attivo, riprova tra 2s
+    setTimeout(scheduleAllNotifications, 2000);
+    return;
+  }
+  if (Notification.permission !== 'granted') return;
+
+  const eventi = leggiEventi ? leggiEventi() : [];
+  const notifiche = [];
+  const ora = Date.now();
+
+  eventi.forEach(ev => {
+    if (ev.stato === 'fatto') return;
+    const extra = ev.extra || {};
+    const dataStr = extra.data || extra.dataInizio;
+    if (!dataStr) return;
+    const dataEvt = new Date(dataStr);
+    const stati = notifStati[ev.id] || [];
+
+    stati.forEach(n => {
+      if (!n.on) return;
+      // Calcola timestamp notifica
+      let ts = calcolaTimestampNotifica(n.desc, dataEvt, n.time);
+      if (!ts || ts <= ora) return;
+      notifiche.push({
+        ts,
+        title: 'AgendaMia — ' + (extra.titolo || extra.tipo || extra.nome || 'Impegno'),
+        body: n.desc + (n.time ? ' · ' + n.time : ''),
+        tag: ev.id + '_' + n.id
+      });
+    });
+  });
+
+  // Manda la lista al service worker
+  navigator.serviceWorker.controller.postMessage({
+    tipo: 'SCHEDULE_NOTIFICHE',
+    notifiche
+  });
+}
+
+function calcolaTimestampNotifica(desc, dataEvt, time) {
+  // Copia della data evento, azzera l'ora
+  const d = new Date(dataEvt);
+  // Applica offset dal desc
+  const descL = desc.toLowerCase();
+  if (descL.includes('settimana prima') || descL.includes('1 settimana')) d.setDate(d.getDate() - 7);
+  else if (descL.includes('mese prima') || descL.includes('1 mese'))     d.setMonth(d.getMonth() - 1);
+  else if (descL.includes('sera prima') || descL.includes('giorno prima') || descL.includes('giorno stesso') && descL.includes('prima')) d.setDate(d.getDate() - 1);
+  else if (descL.includes('mattina') || descL.includes('giorno stesso') || descL.includes('mattina stessa') || descL.includes('giorno scadenza') || descL.includes('mattina scadenza')) { /* stesso giorno */ }
+  // else: stesso giorno
+
+  // Imposta orario
+  if (time) {
+    const [hh, mm] = time.split(':').map(Number);
+    d.setHours(hh, mm, 0, 0);
+  } else {
+    d.setHours(8, 0, 0, 0);
+  }
+  return d.getTime();
+}
+
+// Ri-schedula ogni volta che si salva un evento
+const _origSalvaEventiLS = typeof salvaEventiLS === 'function' ? salvaEventiLS : null;
+// Patch dopo che salvaEventiLS è definita (viene chiamata dopo ogni salvataggio)
+document.addEventListener('DOMContentLoaded', () => {
+  const primoAvvio = !localStorage.getItem('agendamia_onboarding_done');
+  if (primoAvvio) {
+    inizializzaBenvenuto();
+    goTo('benvenuto');
+  }
+});
+
+</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Nunito:wght@400;600;700;800&display=swap">
+
+<style>
+/* === DESIGN TOKENS === */
+/* Layout: app mobile-first, nav bottom fixed, schermata piena altezza */
+:root {
+  --bg:        #F7F8FA;
+  --bg-card:   #FFFFFF;
+  --fg:        #1A1D23;
+  --fg-2:      #6B7280;
+  --fg-3:      #9CA3AF;
+  --border:    #E5E7EB;
+  --accent:    #3B6FE8;
+  --accent-dk: #2A55C4;
+  --accent-bg: #EEF2FF;
+
+  /* stati impegni */
+  --col-scaduto:   #EF4444;
+  --col-scaduto-bg:#FEF2F2;
+  --col-oggi:      #DC2626;
+  --col-oggi-bg:   #FEF2F2;
+  --col-domani:    #D97706;
+  --col-domani-bg: #FFFBEB;
+  --col-settimana: #6B7280;
+  --col-settimana-bg: #F3F4F6;
+  --col-passato:   #9CA3AF;
+  --col-passato-bg:#F9FAFB;
+
+  --radius:  14px;
+  --radius-s: 8px;
+  --nav-h:   64px;
+  --head-h:  56px;
+
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #111318;
+    --bg-card:   #1C1F27;
+    --fg:        #F1F3F7;
+    --fg-2:      #9CA3AF;
+    --fg-3:      #6B7280;
+    --border:    #2D3140;
+    --accent:    #5B8AFF;
+    --accent-dk: #3B6FE8;
+    --accent-bg: #1A2340;
+    --col-scaduto-bg:#2D1515;
+    --col-domani-bg: #2A1F0A;
+    --col-settimana-bg: #1C1F27;
+    --col-passato-bg:#161820;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #111318;
+  --bg-card:   #1C1F27;
+  --fg:        #F1F3F7;
+  --fg-2:      #9CA3AF;
+  --fg-3:      #6B7280;
+  --border:    #2D3140;
+  --accent:    #5B8AFF;
+  --accent-dk: #3B6FE8;
+  --accent-bg: #1A2340;
+  --col-scaduto-bg:#2D1515;
+  --col-domani-bg: #2A1F0A;
+  --col-settimana-bg: #1C1F27;
+  --col-passato-bg:#161820;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  overscroll-behavior: none;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  max-width: 430px;
+  margin: 0 auto;
+  position: relative;
+  overflow: hidden;
+}
+
+/* === SCHERMATE === */
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  transition: transform 0.28s cubic-bezier(.4,0,.2,1), opacity 0.28s;
+}
+.screen.hidden {
+  transform: translateX(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+.screen.slide-left.hidden {
+  transform: translateX(-30%);
+}
+
+/* === HEADER === */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  /* 40px copre qualsiasi status bar Android/iOS senza safe-area */
+  padding-top: max(40px, env(safe-area-inset-top, 40px));
+  min-height: calc(var(--head-h) + max(40px, env(safe-area-inset-top, 40px)));
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.header h1 {
+  font-family: 'Nunito', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: -0.3px;
+}
+.header-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 6px 0;
+}
+.header-back svg { width: 18px; height: 18px; }
+
+/* === BADGE AGGIORNA === */
+.update-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.2px;
+  transition: background 0.15s;
+}
+.update-badge:hover { background: var(--accent-dk); }
+.update-badge svg { width: 14px; height: 14px; }
+/* versione inattiva (nessun aggiornamento) */
+.update-badge.inactive {
+  background: transparent;
+  color: var(--fg-3);
+  border: 1.5px solid var(--border);
+}
+
+/* === CORPO SCROLLABILE === */
+.scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px 24px;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* === LISTA IMPEGNI (HOME) === */
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  margin: 20px 0 8px;
+}
+
+.event-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+  position: relative;
+}
+.event-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.07); }
+
+.event-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+
+.event-body { flex: 1; min-width: 0; }
+.event-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+.event-date {
+  font-size: 0.78rem;
+  color: var(--fg-2);
+}
+.event-cat-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  letter-spacing: 0.2px;
+}
+
+/* stati colore */
+.ev-scaduto  { background: var(--col-scaduto-bg); border-color: #FECACA; }
+.ev-scaduto .event-dot  { background: var(--col-scaduto); }
+.ev-scaduto .event-title { color: var(--col-scaduto); }
+
+.ev-oggi     { background: var(--col-oggi-bg);    border-color: #FECACA; }
+.ev-oggi .event-dot  { background: var(--col-oggi); }
+.ev-oggi .event-title { color: var(--col-oggi); }
+
+.ev-domani   { background: var(--col-domani-bg);  border-color: #FDE68A; }
+.ev-domani .event-dot  { background: var(--col-domani); }
+.ev-domani .event-title { color: var(--col-domani); }
+
+.ev-settimana { background: var(--col-settimana-bg); }
+.ev-settimana .event-dot { background: var(--col-settimana); }
+
+.ev-passato  { background: var(--col-passato-bg); border-color: var(--border); }
+.ev-passato .event-dot  { background: var(--col-passato); }
+.ev-passato .event-title { color: var(--col-passato); }
+.ev-passato .event-date  { color: var(--col-passato); }
+
+/* prossimo impegno (ancora da venire) — evidenziato con accent */
+.ev-prossimo {
+  border: 2px solid var(--accent);
+  background: var(--accent-bg);
+}
+.ev-prossimo .event-dot  { background: var(--accent); }
+.ev-prossimo .event-title { color: var(--accent); font-weight: 700; }
+.ev-prossimo::before {
+  content: "PROSSIMO";
+  position: absolute;
+  top: -1px; right: 14px;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.8px;
+  background: var(--accent);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 0 0 6px 6px;
+}
+
+/* === BOTTOM NAV === */
+.bottom-nav {
+  width: 100%;
+  height: var(--nav-h);
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  flex-shrink: 0;
+  /* overflow visibile per il FAB sollevato */
+  overflow: visible;
+}
+.nav-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 8px 16px;
+  border-radius: var(--radius-s);
+  transition: background 0.12s;
+}
+.nav-btn:hover { background: var(--accent-bg); }
+.nav-btn svg { width: 24px; height: 24px; color: var(--fg-3); }
+.nav-btn span {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.3px;
+}
+.nav-btn.active svg { color: var(--accent); }
+.nav-btn.active span { color: var(--accent); }
+
+/* FAB nuovo impegno — dentro la bottom-nav */
+.fab {
+  width: 52px; height: 52px;
+  background: var(--accent);
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 16px rgba(59,111,232,.4);
+  transition: background 0.15s, transform 0.15s;
+  flex-shrink: 0;
+  /* sollevato rispetto alla nav */
+  margin-top: -20px;
+}
+.fab:hover { background: var(--accent-dk); transform: scale(1.06); }
+.fab svg { width: 26px; height: 26px; color: #fff; }
+
+/* === SCHERMATA NUOVO IMPEGNO === */
+.cat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  padding: 24px 0 16px;
+}
+.cat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 18px 8px;
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  border: 1.5px solid var(--border);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.12s;
+}
+.cat-item:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 16px rgba(59,111,232,.12);
+  transform: translateY(-2px);
+}
+.cat-icon {
+  width: 56px; height: 56px;
+  border-radius: 16px;
+  background: var(--accent-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cat-icon svg { width: 32px; height: 32px; }
+.cat-icon.visite { background: #FEF2F2; }
+.cat-icon.visite svg { color: #DC2626; }
+.cat-icon.farmaci svg { color: var(--accent); }
+.cat-icon.ricorrenze { background: #FFF7ED; }
+.cat-icon.ricorrenze svg { color: #EA580C; }
+.cat-icon.documenti { background: #F0FDF4; }
+.cat-icon.documenti svg { color: #16A34A; }
+.cat-icon.auto { background: #EFF6FF; }
+.cat-icon.auto svg { color: #2563EB; }
+.cat-icon.generico { background: #F5F3FF; }
+.cat-icon.generico svg { color: #7C3AED; }
+.cat-icon.acquisti { background: #FDF4FF; }
+.cat-icon.acquisti svg { color: #9333EA; }
+
+.cat-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--fg);
+  text-align: center;
+  line-height: 1.2;
+}
+
+/* === FORM === */
+.form-wrap {
+  padding: 20px 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.form-group label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--fg-2);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 12px 14px;
+  font-size: 0.95rem;
+  color: var(--fg);
+  font-family: inherit;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.form-group textarea { resize: vertical; min-height: 70px; }
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 15px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+  width: 100%;
+  margin-top: 8px;
+}
+.btn-primary:hover { background: var(--accent-dk); }
+
+/* === UTENTE === */
+.profile-avatar {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  background: var(--accent-bg);
+  border: 3px solid var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 24px auto 8px;
+}
+.profile-avatar svg { width: 36px; height: 36px; color: var(--accent); }
+
+.profile-name {
+  text-align: center;
+  font-family: 'Nunito', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+.profile-sub {
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--fg-3);
+  margin-bottom: 20px;
+}
+
+.settings-section {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.settings-section-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  padding: 12px 16px 4px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.settings-row:first-of-type { border-top: none; }
+.settings-row svg { width: 20px; height: 20px; color: var(--fg-2); flex-shrink: 0; }
+.settings-row-body { flex: 1; min-width: 0; }
+.settings-row-label { font-size: 0.9rem; font-weight: 600; color: var(--fg); }
+.settings-row-value { font-size: 0.78rem; color: var(--fg-3); margin-top: 1px; }
+.settings-row-chevron { color: var(--fg-3); }
+.settings-row-chevron svg { width: 16px; height: 16px; }
+
+.backup-freq {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 14px;
+}
+.freq-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--fg-2);
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+.freq-btn.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* campo obbligatorio errore */
+.field-error {
+  border-color: var(--col-scaduto) !important;
+  background: var(--col-scaduto-bg) !important;
+}
+.field-error-msg {
+  font-size: 0.75rem;
+  color: var(--col-scaduto);
+  margin-top: 3px;
+  font-weight: 600;
+}
+
+/* orari calcolati */
+.time-primary {
+  flex: 1;
+  min-width: 80px;
+}
+.time-calculated {
+  flex: 1;
+  min-width: 80px;
+  background: var(--bg) !important;
+  color: var(--fg-3) !important;
+  border-color: var(--border) !important;
+  cursor: not-allowed;
+  position: relative;
+}
+.time-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex: 1;
+  min-width: 80px;
+}
+.time-wrap-label {
+  font-size: 0.65rem;
+  color: var(--fg-3);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+/* scrollbar sottile */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* === LISTE === */
+.liste-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.btn-nuova-lista {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 7px 14px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn-nuova-lista:hover { background: var(--accent-dk); }
+.btn-nuova-lista svg { width: 14px; height: 14px; }
+
+.lista-card {
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.lista-card:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(59,111,232,.1); }
+.lista-card-icon {
+  width: 42px; height: 42px;
+  border-radius: 12px;
+  background: var(--accent-bg);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.lista-card-icon svg { width: 22px; height: 22px; color: var(--accent); }
+.lista-card-body { flex: 1; min-width: 0; }
+.lista-card-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lista-card-meta {
+  font-size: 0.75rem;
+  color: var(--fg-3);
+  margin-top: 2px;
+}
+.lista-card-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-radius: 10px;
+  padding: 3px 9px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.lista-card-badge.zero { background: var(--bg); color: var(--fg-3); }
+
+/* archivio */
+.archivio-section {
+  margin-top: 8px;
+}
+.archivio-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--fg-3);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  border: none;
+  background: none;
+  width: 100%;
+  font-family: inherit;
+}
+.archivio-toggle svg { width: 14px; height: 14px; transition: transform 0.2s; }
+.archivio-toggle.open svg { transform: rotate(90deg); }
+#archivio-lista-list { display: none; }
+#archivio-lista-list.open { display: block; }
+
+.lista-card.archiviata {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+/* dettaglio lista */
+.todo-add-row {
+  display: flex;
+  gap: 8px;
+  padding: 16px 0 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+.todo-add-row input {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 11px 14px;
+  font-size: 0.95rem;
+  color: var(--fg);
+  font-family: inherit;
+}
+.todo-add-row input:focus { outline: none; border-color: var(--accent); }
+.todo-add-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-s);
+  width: 44px;
+  height: 44px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.todo-add-btn:hover { background: var(--accent-dk); }
+.todo-add-btn svg { width: 20px; height: 20px; }
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 13px 14px;
+  margin-bottom: 6px;
+  transition: opacity 0.2s;
+}
+.todo-item.done { opacity: 0.45; }
+.todo-checkbox {
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  border: 2px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.todo-checkbox.checked { background: var(--accent); border-color: var(--accent); }
+.todo-checkbox svg { width: 13px; height: 13px; color: #fff; display: none; }
+.todo-checkbox.checked svg { display: block; }
+.todo-text {
+  flex: 1;
+  font-size: 0.92rem;
+  color: var(--fg);
+  word-break: break-word;
+}
+.todo-item.done .todo-text { text-decoration: line-through; color: var(--fg-3); }
+.todo-del {
+  color: var(--fg-3);
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 4px;
+  display: flex; align-items: center;
+  border-radius: 4px;
+  transition: color 0.15s;
+}
+.todo-del:hover { color: var(--col-scaduto); }
+.todo-del svg { width: 16px; height: 16px; }
+
+.todo-section-sep {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  padding: 12px 2px 6px;
+}
+
+.lista-actions {
+  display: flex;
+  gap: 10px;
+  padding: 16px 0 8px;
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+}
+.btn-archivia {
+  flex: 1;
+  padding: 11px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--fg-2);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.btn-archivia:hover { border-color: var(--accent); color: var(--accent); }
+.btn-archivia svg { width: 16px; height: 16px; }
+.btn-elimina-lista {
+  flex: 1;
+  padding: 11px;
+  border-radius: var(--radius-s);
+  border: 1.5px solid #FECACA;
+  background: var(--col-scaduto-bg);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--col-scaduto);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.btn-elimina-lista:hover { background: #FCA5A5; }
+.btn-elimina-lista svg { width: 16px; height: 16px; }
+
+/* modal conferma */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: flex-end; justify-content: center;
+  z-index: 200;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s;
+}
+.modal-overlay.open { opacity: 1; pointer-events: all; }
+.modal-sheet {
+  background: var(--bg-card);
+  border-radius: 20px 20px 0 0;
+  padding: 20px 24px 32px;
+  width: 100%;
+  max-width: 430px;
+  transform: translateY(40px);
+  transition: transform 0.2s;
+}
+.modal-overlay.open .modal-sheet { transform: translateY(0); }
+.modal-title { font-size: 1rem; font-weight: 700; color: var(--fg); margin-bottom: 6px; }
+.modal-body { font-size: 0.88rem; color: var(--fg-2); margin-bottom: 20px; line-height: 1.5; }
+.modal-btns { display: flex; gap: 10px; }
+.modal-btns button { flex: 1; padding: 13px; border-radius: var(--radius-s); font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; border: none; }
+.modal-cancel { background: var(--bg); color: var(--fg-2); border: 1.5px solid var(--border) !important; }
+.modal-confirm { background: var(--col-scaduto); color: #fff; }
+
+/* toggle switch generico (utente, ricorrenza annuale) */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.toggle-label { font-size: 0.9rem; font-weight: 500; color: var(--fg); }
+.toggle {
+  width: 44px; height: 26px;
+  background: var(--border);
+  border-radius: 13px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  border: none;
+  flex-shrink: 0;
+  padding: 0;
+}
+.toggle.on { background: var(--accent); }
+.toggle::after {
+  content: '';
+  width: 20px; height: 20px;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  top: 3px; left: 3px;
+  transition: left 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.2);
+}
+.toggle.on::after { left: 21px; }
+
+/* === NOTIFICHE INTERATTIVE === */
+.notif-block {
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 0;
+  display: flex;
+  flex-direction: column;
+}
+.notif-item {
+  display: grid;
+  grid-template-columns: 36px 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item.off { opacity: 0.45; }
+
+.notif-toggle {
+  width: 36px; height: 22px;
+  background: var(--border);
+  border-radius: 11px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  border: none;
+  flex-shrink: 0;
+  padding: 0;
+}
+.notif-toggle.on { background: var(--accent); }
+.notif-toggle::after {
+  content: '';
+  width: 16px; height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  position: absolute;
+  top: 3px; left: 3px;
+  transition: left 0.18s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.18);
+}
+.notif-toggle.on::after { left: 17px; }
+
+.notif-desc {
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--fg);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notif-time-input {
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 0.82rem;
+  color: var(--fg);
+  font-family: inherit;
+  width: 80px;
+  flex-shrink: 0;
+  cursor: pointer;
+  text-align: center;
+}
+.notif-time-input:focus { outline: none; border-color: var(--accent); }
+
+.notif-del {
+  color: var(--fg-3);
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 4px;
+  display: flex; align-items: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: color 0.12s;
+}
+.notif-del:hover { color: var(--col-scaduto); }
+.notif-del svg { width: 15px; height: 15px; }
+
+.notif-add-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--accent);
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  border-top: 1px solid var(--border);
+  width: 100%;
+}
+.notif-add-btn svg { width: 14px; height: 14px; }
+.notif-add-btn:hover { background: var(--accent-bg); }
+
+/* === BOTTONE FATTO SU CARD === */
+.ev-done-btn {
+  background: none;
+  border: 1.5px solid var(--border);
+  border-radius: 50%;
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  color: var(--fg-3);
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  margin-left: 8px;
+}
+.ev-done-btn:hover { background: #DCFCE7; color: #16A34A; border-color: #16A34A; }
+.ev-del-btn {
+  background: none;
+  border: none;
+  border-radius: 50%;
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  color: var(--fg-3);
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+.ev-del-btn:hover { background: #FEE2E2; color: var(--col-scaduto); }
+.event-card { display: flex; align-items: center; }
+.event-body { flex: 1; min-width: 0; }
+
+/* === SALVA in header === */
+.btn-save-header {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 7px 18px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn-save-header:hover { background: var(--accent-dk); }
+
+/* === DATE / TIME PICKER CUSTOM === */
+.date-trigger {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 13px 14px;
+  font-size: 0.95rem; color: var(--fg);
+  font-family: inherit; width: 100%;
+  cursor: pointer; text-align: left;
+  transition: border-color 0.15s;
+}
+.date-trigger:focus { outline: none; border-color: var(--accent); }
+.date-trigger svg   { color: var(--accent); flex-shrink: 0; }
+.date-trigger.filled span { color: var(--fg); }
+.date-trigger:not(.filled) span { color: var(--fg-3); }
+
+/* ---- PICKER OVERLAY ---- */
+.picker-overlay {
+  position: absolute; inset: 0;
+  background: rgba(0,0,0,.52);
+  z-index: 9999;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.22s;
+}
+.picker-overlay.open { opacity: 1; pointer-events: all; }
+
+.picker-sheet {
+  background: var(--bg-card);
+  border-radius: 22px 22px 0 0;
+  width: 100%;
+  max-width: 480px;
+  max-height: 88vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-bottom: max(env(safe-area-inset-bottom), 16px);
+  transform: translateY(100%);
+  transition: transform 0.26s cubic-bezier(.32,0,.18,1);
+  user-select: none;
+  box-sizing: border-box;
+}
+.picker-overlay.open .picker-sheet { transform: translateY(0); }
+
+/* handle */
+.picker-handle {
+  width: 38px; height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 12px auto 4px;
+}
+
+/* header */
+.picker-header {
+  display: flex; align-items: center;
+  padding: 8px 16px 12px;
+}
+.picker-title {
+  flex: 1; text-align: center;
+  font-size: 1rem; font-weight: 700;
+  color: var(--fg);
+}
+.picker-cancel {
+  background: none; border: none;
+  color: var(--fg-3); font-size: 0.9rem;
+  font-weight: 600; cursor: pointer;
+  font-family: inherit; padding: 6px 8px;
+  border-radius: 8px;
+  transition: background 0.12s;
+}
+.picker-cancel:active { background: var(--accent-bg); }
+.picker-confirm {
+  background: var(--accent); color: #fff;
+  border: none; border-radius: 18px;
+  padding: 7px 18px;
+  font-size: 0.88rem; font-weight: 700;
+  cursor: pointer; font-family: inherit;
+  transition: opacity 0.12s;
+}
+.picker-confirm:active { opacity: 0.8; }
+
+/* ---- CALENDARIO ---- */
+.cal-nav {
+  display: flex; align-items: center;
+  padding: 0 12px 6px; gap: 4px;
+}
+.cal-nav-btn {
+  background: none; border: none;
+  color: var(--fg-2); cursor: pointer;
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px; font-size: 1.5rem; line-height: 1;
+  transition: background 0.12s;
+  flex-shrink: 0;
+}
+.cal-nav-btn:active { background: var(--accent-bg); color: var(--accent); }
+.cal-month-btn {
+  flex: 1;
+  background: none; border: none;
+  font-size: 1rem; font-weight: 700;
+  color: var(--fg); cursor: pointer;
+  font-family: inherit;
+  padding: 6px 8px; border-radius: 10px;
+  text-align: center;
+  transition: background 0.12s;
+}
+.cal-month-btn:active { background: var(--accent-bg); color: var(--accent); }
+
+.cal-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  padding: 0 10px 2px;
+}
+.cal-weekdays span {
+  text-align: center;
+  font-size: 0.72rem; font-weight: 700;
+  color: var(--fg-3);
+  letter-spacing: 0.3px;
+  padding: 4px 0;
+}
+
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  padding: 0 10px 12px;
+  gap: 4px 0;
+}
+.cal-cell {
+  aspect-ratio: 1;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.98rem; font-weight: 500;
+  color: var(--fg);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  border: none; background: none;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+.cal-cell.empty { visibility: hidden; pointer-events: none; }
+.cal-cell:not(.empty):active { background: var(--accent-bg); color: var(--accent); }
+.cal-cell.today { font-weight: 800; color: var(--accent); }
+.cal-cell.selected { background: var(--accent) !important; color: #fff !important; font-weight: 700; }
+
+/* ---- ANNO/MESE PICKER ---- */
+.ym-picker {
+  padding: 0 12px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ym-decade-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 0;
+}
+.ym-decade-nav button {
+  background: none; border: none; cursor: pointer;
+  color: var(--fg-2); font-size: 1.5rem; line-height: 1;
+  width: 36px; height: 36px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; transition: background 0.12s;
+}
+.ym-decade-nav button:active { background: var(--accent-bg); color: var(--accent); }
+#ym-decade-label { font-size: 0.95rem; font-weight: 700; color: var(--fg); }
+.ym-year-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.ym-month-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 4px;
+}
+.ym-year-btn, .ym-month-btn {
+  padding: 10px 4px;
+  text-align: center;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.88rem; font-weight: 600;
+  color: var(--fg); background: var(--bg);
+  border: none; font-family: inherit;
+  transition: background 0.12s;
+}
+.ym-year-btn:active, .ym-month-btn:active { background: var(--accent-bg); color: var(--accent); }
+.ym-year-btn.active, .ym-month-btn.active { background: var(--accent); color: #fff; }
+.ym-step-title {
+  font-size: 0.82rem; font-weight: 700; color: var(--fg-3);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 0 4px 8px; text-align: center;
+}
+.ym-month-btn { grid-column: span 1; }
+
+/* ---- TIME PICKER (rulli scroll) ---- */
+.time-picker-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 8px 24px 24px;
+  position: relative;
+}
+.time-sep {
+  font-size: 2rem; font-weight: 700;
+  color: var(--fg); padding: 0 6px;
+  flex-shrink: 0; pointer-events: none;
+}
+.time-col-wrap {
+  flex: 1;
+  position: relative;
+  height: 210px;
+  max-width: 100px;
+}
+.time-col {
+  height: 210px;
+  overflow-y: scroll;
+  scroll-snap-type: y mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.time-col::-webkit-scrollbar { display: none; }
+.time-col-pad { height: 80px; flex-shrink: 0; }
+.time-col-item {
+  height: 52px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.6rem; font-weight: 600;
+  color: var(--fg-3);
+  scroll-snap-align: center;
+  cursor: pointer;
+}
+/* linee highlight al centro */
+.time-col-wrap::before, .time-col-wrap::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 1;
+}
+.time-col-wrap::before { top: calc(50% - 27px); }
+.time-col-wrap::after  { top: calc(50% + 25px); }
+
+/* notif time button */
+.notif-time-btn {
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.9rem; font-weight: 600;
+  color: var(--fg); font-family: inherit;
+  cursor: pointer; white-space: nowrap;
+  min-width: 64px; text-align: center; flex-shrink: 0;
+}
+.notif-time-btn:active { border-color: var(--accent); }
+
+</style>
+
+
+<!-- ============================================================
+     SCHERMATA BENVENUTO (primo avvio)
+     ============================================================ -->
+<div class="screen" id="screen-benvenuto" style="justify-content:center;align-items:center;padding:32px 24px;text-align:center">
+  <div style="font-size:3.5rem;margin-bottom:16px">📅</div>
+  <h1 style="font-size:1.6rem;font-weight:800;color:var(--fg);margin-bottom:8px">AgendaMia</h1>
+  <p style="font-size:0.95rem;color:var(--fg-2);margin-bottom:32px;line-height:1.5">
+    Il tuo agenda personale,<br>tutto sul tuo telefono.
+  </p>
+
+  <!-- Box compatibilità notifiche -->
+  <div id="notif-compat-box" style="width:100%;background:var(--bg-card);border-radius:16px;padding:20px;margin-bottom:28px;text-align:left;border:1.5px solid var(--border)">
+    <div style="font-size:1.2rem;margin-bottom:8px" id="notif-compat-icon">⏳</div>
+    <div style="font-size:0.92rem;font-weight:700;color:var(--fg);margin-bottom:6px" id="notif-compat-title">Controllo dispositivo…</div>
+    <div style="font-size:0.84rem;color:var(--fg-2);line-height:1.5" id="notif-compat-msg"></div>
+  </div>
+
+  <!-- Pulsante installazione (Android Chrome) -->
+  <div id="install-box" style="display:none;width:100%;margin-bottom:16px">
+    <button id="btn-install-pwa" onclick="installPWA()"
+      style="width:100%;padding:15px;background:var(--accent);color:#fff;border:none;border-radius:14px;font-size:1rem;font-weight:700;font-family:inherit;cursor:pointer;margin-bottom:10px">
+      📲 Installa AgendaMia
+    </button>
+    <p style="font-size:0.78rem;color:var(--fg-3)">Installando l'app riceverai le notifiche anche con il telefono in standby.</p>
+  </div>
+
+  <button onclick="avviaApp()"
+    style="width:100%;padding:15px;background:var(--accent);color:#fff;border:none;border-radius:14px;font-size:1rem;font-weight:700;font-family:inherit;cursor:pointer">
+    Inizia →
+  </button>
+</div>
+
+<!-- ============================================================
+     HOME SCREEN
+     ============================================================ -->
+<div class="screen" id="screen-home">
+  <div class="header">
+    <h1>AgendaMia</h1>
+    <button class="update-badge inactive" id="btn-update" onclick="showToast('Nessun aggiornamento disponibile')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      Aggiorna
+    </button>
+  </div>
+
+  <div class="scroll-body" id="home-list">
+    <!-- popolato da renderHome() -->
+  </div><!-- /scroll-body -->
+
+  <!-- bottom nav -->
+  <nav class="bottom-nav">
+    <button class="nav-btn" id="nav-liste-home" onclick="goTo('liste')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+      <span>Liste</span>
+    </button>
+    <button class="fab" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+    </button>
+    <button class="nav-btn" onclick="goTo('utente')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+      <span>Profilo</span>
+    </button>
+  </nav>
+
+</div>
+
+
+<!-- ============================================================
+     SCHERMATA: NUOVO IMPEGNO
+     ============================================================ -->
+<div class="screen hidden" id="screen-nuovo">
+  <div class="header">
+    <button class="header-back" onclick="goTo('home')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Home
+    </button>
+    <h1 style="font-size:1rem;color:var(--fg)">Nuovo impegno</h1>
+    <div style="width:60px"></div>
+  </div>
+
+  <div class="scroll-body">
+    <div class="section-label" style="margin-top:8px">Scegli categoria</div>
+    <div class="cat-grid">
+
+      <!-- Farmaci -->
+      <div class="cat-item" onclick="goTo('form-farmaci')">
+        <div class="cat-icon farmaci">
+          <!-- pillola bicolore su scatolino -->
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <!-- scatolino base -->
+            <rect x="7" y="20" width="18" height="9" rx="2" fill="#DBEAFE" stroke="#3B6FE8" stroke-width="1.4"/>
+            <line x1="7" y1="23.5" x2="25" y2="23.5" stroke="#3B6FE8" stroke-width="1"/>
+            <!-- pillola: metà sinistra bianca, metà destra rossa -->
+            <clipPath id="pill-left"><rect x="5" y="9" width="11" height="10"/></clipPath>
+            <clipPath id="pill-right"><rect x="16" y="9" width="11" height="10"/></clipPath>
+            <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="white" stroke="#9CA3AF" stroke-width="1.4" clip-path="url(#pill-left)"/>
+            <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="#EF4444" stroke="#EF4444" stroke-width="0" clip-path="url(#pill-right)"/>
+            <!-- bordo unico della pillola -->
+            <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="none" stroke="#9CA3AF" stroke-width="1.4"/>
+            <!-- linea di divisione centrale -->
+            <line x1="16" y1="9.5" x2="16" y2="18.5" stroke="#9CA3AF" stroke-width="1.2"/>
+          </svg>
+        </div>
+        <span class="cat-label">Farmaci</span>
+      </div>
+
+      <!-- Visite mediche -->
+      <div class="cat-item" onclick="goTo('form-visite')">
+        <div class="cat-icon visite">
+          <!-- H ospedaliera -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="4" y="4" width="24" height="24" rx="4" stroke-width="1.8"/>
+            <text x="16" y="23" text-anchor="middle" font-size="16" font-weight="800" font-family="Arial" fill="#DC2626" stroke="none">H</text>
+          </svg>
+        </div>
+        <span class="cat-label">Visite mediche</span>
+      </div>
+
+      <!-- Ricorrenze -->
+      <div class="cat-item" onclick="goTo('form-ricorrenze')">
+        <div class="cat-icon ricorrenze">
+          <!-- torta con candelina -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="4" y="16" width="24" height="12" rx="3"/>
+            <path d="M4 20 Q10 16 16 20 Q22 24 28 20"/>
+            <line x1="16" y1="16" x2="16" y2="10"/>
+            <path d="M14 8 Q16 5 18 8" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <span class="cat-label">Ricorrenze</span>
+      </div>
+
+      <!-- Documenti -->
+      <div class="cat-item" onclick="goTo('form-documenti')">
+        <div class="cat-icon documenti">
+          <!-- sagoma CI/patente -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="3" y="8" width="26" height="16" rx="3"/>
+            <circle cx="10" cy="16" r="3"/>
+            <line x1="16" y1="13" x2="26" y2="13"/>
+            <line x1="16" y1="17" x2="24" y2="17"/>
+            <line x1="16" y1="21" x2="22" y2="21"/>
+          </svg>
+        </div>
+        <span class="cat-label">Documenti</span>
+      </div>
+
+      <!-- Auto -->
+      <div class="cat-item" onclick="goTo('form-auto')">
+        <div class="cat-icon auto">
+          <!-- automobile -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M5 18 L8 12 Q9 10 12 10 L20 10 Q23 10 24 12 L27 18 Z"/>
+            <rect x="4" y="18" width="24" height="7" rx="2"/>
+            <circle cx="9" cy="25" r="2.5"/>
+            <circle cx="23" cy="25" r="2.5"/>
+            <rect x="12" y="12" width="8" height="5" rx="1"/>
+          </svg>
+        </div>
+        <span class="cat-label">Auto</span>
+      </div>
+
+      <!-- Impegno generico -->
+      <div class="cat-item" onclick="goTo('form-generico')">
+        <div class="cat-icon generico">
+          <!-- tavolo con persone -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="4" y="15" width="24" height="3" rx="1.5"/>
+            <line x1="8" y1="18" x2="8" y2="26"/>
+            <line x1="24" y1="18" x2="24" y2="26"/>
+            <circle cx="10" cy="11" r="2.5"/>
+            <circle cx="22" cy="11" r="2.5"/>
+            <circle cx="16" cy="10" r="2.5"/>
+          </svg>
+        </div>
+        <span class="cat-label">Impegno generico</span>
+      </div>
+
+      <!-- Acquisti -->
+      <div class="cat-item" onclick="goTo('form-acquisti')" style="grid-column: 1 / -1; max-width: calc(33.3% - 10px); margin: 0 auto;">
+        <div class="cat-icon acquisti">
+          <!-- carrello -->
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 5 L8 5 L12 20 L24 20 L27 11 L10 11"/>
+            <circle cx="13" cy="24" r="2"/>
+            <circle cx="22" cy="24" r="2"/>
+          </svg>
+        </div>
+        <span class="cat-label">Acquisti</span>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     FORM: VISITE MEDICHE (esempio)
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-visite">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#FEF2F2;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <span style="font-size:0.7rem;font-weight:900;color:#DC2626;font-family:Arial">H</span>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Visita medica</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('visite')">Salva</button>
+  </div>
+
+  <div class="scroll-body">
+    <div class="form-wrap">
+
+      <div class="form-group">
+        <label>Tipo di visita</label>
+        <input type="text" id="visite-tipo" placeholder="es. Cardiologica, Oculistica…">
+      </div>
+
+      <div class="form-group">
+        <label>Data e ora</label>
+        <button type="button" class="date-trigger" id="visite-data-btn" onclick="openDatePicker('visite-data','datetime')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="visite-data-lbl">Scegli data e ora</span>
+        </button>
+        <input type="hidden" id="visite-data" value="">
+      </div>
+
+      <div class="form-group">
+        <label>Struttura / luogo (opzionale)</label>
+        <input type="text" id="visite-luogo" placeholder="es. Policlinico, Studio Dr. Rossi…">
+      </div>
+
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="visite-note" placeholder="Informazioni aggiuntive…"></textarea>
+      </div>
+
+      <!-- Notifiche -->
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-visite"></div>
+      </div>
+
+      <button class="btn-primary" onclick="salvaEvento('visite')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     FORM: FARMACI (esempio)
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-farmaci">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:var(--accent-bg);border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <clipPath id="pl2"><rect x="5" y="9" width="11" height="10"/></clipPath>
+          <clipPath id="pr2"><rect x="16" y="9" width="11" height="10"/></clipPath>
+          <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="white" stroke="#9CA3AF" stroke-width="1.4" clip-path="url(#pl2)"/>
+          <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="#EF4444" clip-path="url(#pr2)"/>
+          <rect x="6" y="9.5" width="20" height="9" rx="4.5" fill="none" stroke="#9CA3AF" stroke-width="1.4"/>
+          <line x1="16" y1="9.5" x2="16" y2="18.5" stroke="#9CA3AF" stroke-width="1.2"/>
+        </svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Farmaco</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaFarmaco()">Salva</button>
+  </div>
+
+  <div class="scroll-body">
+    <div class="form-wrap">
+
+      <div class="form-group">
+        <label>Nome farmaco <span style="color:var(--col-scaduto)">*</span></label>
+        <input type="text" id="farmaco-nome" placeholder="es. Amoxicillina 500mg" required autocomplete="off">
+      </div>
+
+      <div class="form-group">
+        <label>Foto scatola / blister (opzionale)</label>
+        <input type="file" accept="image/*" capture="environment" id="foto-input" style="display:none" onchange="mostraFoto(this)">
+        <div id="foto-area" onclick="document.getElementById('foto-input').click()"
+          style="border:2px dashed var(--border);border-radius:var(--radius-s);padding:20px;text-align:center;color:var(--fg-3);font-size:0.85rem;cursor:pointer;background:var(--bg)">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto 6px;display:block"><path stroke-linecap="round" stroke-linejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/><circle cx="12" cy="13" r="3"/></svg>
+          Tocca per aggiungere foto
+        </div>
+        <img id="foto-preview" style="display:none;width:100%;border-radius:var(--radius-s);margin-top:8px;max-height:180px;object-fit:cover">
+      </div>
+
+      <div class="form-group">
+        <label>Frequenza assunzione</label>
+        <select id="freq-select" onchange="aggiornaOrari()">
+          <option value="1" selected>1 volta al giorno</option>
+          <option value="2">2 volte al giorno</option>
+          <option value="3">3 volte al giorno</option>
+          <option value="8">Ogni 8 ore</option>
+          <option value="12">Ogni 12 ore</option>
+          <option value="alterne">A settimane alterne</option>
+          <option value="custom">Personalizzata…</option>
+        </select>
+      </div>
+
+      <div class="form-group" id="group-orari">
+        <label>Orari assunzione</label>
+        <div id="orari-wrap" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+        <div id="alterne-wrap" style="display:none;flex-direction:column;gap:8px">
+          <select style="width:100%">
+            <option>Lunedì</option><option>Martedì</option><option>Mercoledì</option>
+            <option>Giovedì</option><option>Venerdì</option><option>Sabato</option><option>Domenica</option>
+          </select>
+          <button type="button" class="date-trigger" id="alterne-ora-btn" onclick="openTimePicker('alterne-ora')">
+            <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="9"/><path stroke-linecap="round" d="M12 7v5l3 3"/></svg>
+            <span id="alterne-ora-lbl">08:00</span>
+          </button>
+          <input type="hidden" id="alterne-ora" value="08:00">
+        </div>
+        <div id="custom-wrap" style="display:none;flex-direction:column;gap:10px">
+          <div style="display:flex;gap:10px;align-items:flex-end">
+            <div style="flex:1">
+              <div style="font-size:0.8rem;color:var(--fg-2);margin-bottom:4px">Ora prima dose</div>
+              <button type="button" class="date-trigger" id="custom-prima-dose-btn" onclick="openTimePicker('custom-prima-dose', aggiornaOrariCustom)">
+                <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="9"/><path stroke-linecap="round" d="M12 7v5l3 3"/></svg>
+                <span id="custom-prima-dose-lbl">08:00</span>
+              </button>
+              <input type="hidden" id="custom-prima-dose" value="08:00">
+            </div>
+            <div style="flex:1">
+              <div style="font-size:0.8rem;color:var(--fg-2);margin-bottom:4px">Dosi al giorno</div>
+              <input type="number" id="custom-n-dosi" value="3" min="1" max="24" style="width:100%" oninput="aggiornaOrariCustom()">
+            </div>
+          </div>
+          <div id="custom-orari-calcolati" style="font-size:0.85rem;color:var(--fg-2);padding:8px 12px;background:var(--bg);border-radius:8px;border:1.5px solid var(--border)"></div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Data inizio</label>
+        <button type="button" class="date-trigger" id="farmaci-data-btn" onclick="openDatePicker('farmaci-data','date')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="farmaci-data-lbl">Scegli data</span>
+        </button>
+        <input type="hidden" id="farmaci-data" value="">
+      </div>
+
+      <div class="form-group">
+        <label>Durata</label>
+        <select>
+          <option>7 giorni</option>
+          <option selected>10 giorni</option>
+          <option>15 giorni</option>
+          <option>30 giorni</option>
+          <option>Indefinita</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea placeholder="Prendere a stomaco pieno…"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-farmaci"></div>
+      </div>
+
+      <button class="btn-primary" onclick="salvaFarmaco()">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============================================================
+     SCHERMATA UTENTE / PROFILO
+     ============================================================ -->
+<div class="screen hidden" id="screen-utente">
+  <div class="header">
+    <button class="header-back" onclick="goTo('home')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Home
+    </button>
+    <h1 style="font-size:1rem;color:var(--fg)">Profilo</h1>
+    <div style="width:60px"></div>
+  </div>
+
+  <div class="scroll-body">
+
+    <div class="profile-avatar">
+      <svg fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+    </div>
+    <div class="profile-name">Il mio profilo</div>
+    <div class="profile-sub">Dati personali e impostazioni</div>
+
+    <!-- Dati personali -->
+    <div class="settings-section">
+      <div class="settings-section-title">Dati personali</div>
+      <div class="settings-row">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Numero di telefono</div>
+          <div class="settings-row-value">+39 333 123 4567</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+      <div class="settings-row">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Email</div>
+          <div class="settings-row-value">mario.rossi@email.it</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+      <div class="settings-row">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Nome</div>
+          <div class="settings-row-value">Mario Rossi</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+    </div>
+
+    <!-- Backup -->
+    <div class="settings-section">
+      <div class="settings-section-title">Backup dati</div>
+      <div class="settings-row" style="cursor:default">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-2m-4-1v8m0 0l-3-3m3 3l3-3"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Frequenza backup impegni</div>
+          <div class="settings-row-value">Invia file JSON alla tua email</div>
+        </div>
+      </div>
+      <div class="backup-freq">
+        <button class="freq-btn" onclick="setFreq(this,3)">3 mesi</button>
+        <button class="freq-btn active" onclick="setFreq(this,6)">6 mesi</button>
+        <button class="freq-btn" onclick="setFreq(this,9)">9 mesi</button>
+        <button class="freq-btn" onclick="setFreq(this,12)">12 mesi</button>
+      </div>
+      <div class="settings-row" onclick="showToast('Backup inviato a mario.rossi@email.it ✓')">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Invia backup ora</div>
+          <div class="settings-row-value">Ultimo backup: mai</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+    </div>
+
+    <!-- Notifiche -->
+    <div class="settings-section">
+      <div class="settings-section-title">Notifiche</div>
+      <div class="settings-row" style="cursor:default">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Notifiche attive</div>
+          <div class="settings-row-value">Gestite dalle impostazioni Android</div>
+        </div>
+        <button class="toggle on" onclick="this.classList.toggle('on')" style="flex-shrink:0"></button>
+      </div>
+    </div>
+
+    <!-- Aggiorna app -->
+    <div class="settings-section" style="margin-bottom:8px">
+      <div class="settings-section-title">App</div>
+      <div class="settings-row" onclick="showToast('Versione 1.0.0 — nessun aggiornamento disponibile')">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Controlla aggiornamenti</div>
+          <div class="settings-row-value">Versione 1.0.0</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+      <div class="settings-row" onclick="showToast('App installata sulla home screen ✓')">
+        <svg fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+        <div class="settings-row-body">
+          <div class="settings-row-label">Installa su home screen</div>
+          <div class="settings-row-value">Aggiungi come app sul telefono</div>
+        </div>
+        <div class="settings-row-chevron"><svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg></div>
+      </div>
+    </div>
+
+  </div><!-- /scroll-body -->
+
+  <nav class="bottom-nav">
+    <button class="nav-btn" id="nav-liste-utente" onclick="goTo('liste')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+      <span>Liste</span>
+    </button>
+    <button class="fab" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/>
+      </svg>
+    </button>
+    <button class="nav-btn active" onclick="goTo('utente')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+      <span>Profilo</span>
+    </button>
+  </nav>
+
+</div>
+
+
+<!-- ============================================================
+     FORM: RICORRENZE
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-ricorrenze">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#FFF7ED;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 32 32" fill="none" stroke="#EA580C" stroke-width="1.8"><rect x="4" y="16" width="24" height="12" rx="3"/><path d="M4 20 Q10 16 16 20 Q22 24 28 20"/><line x1="16" y1="16" x2="16" y2="10"/><path d="M14 8 Q16 5 18 8" stroke-linecap="round"/></svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Ricorrenza</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('ricorrenze')">Salva</button>
+  </div>
+  <div class="scroll-body">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label>Nome ricorrenza <span style="color:var(--col-scaduto)">*</span></label>
+        <input type="text" id="ricorrenze-nome" placeholder="es. Compleanno di Marco" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Data</label>
+        <button type="button" class="date-trigger" id="ricorrenze-data-btn" onclick="openDatePicker('ricorrenze-data','date')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="ricorrenze-data-lbl">Scegli data</span>
+        </button>
+        <input type="hidden" id="ricorrenze-data" value="">
+      </div>
+      <div class="form-group">
+        <label>Si ripete ogni anno</label>
+        <div class="notif-block">
+          <div class="toggle-row">
+            <span class="toggle-label">Ricorrenza annuale</span>
+            <button class="toggle on" onclick="this.classList.toggle('on')"></button>
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="ricorrenze-note" placeholder="Informazioni aggiuntive…"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-ricorrenze"></div>
+      </div>
+      <button class="btn-primary" onclick="salvaEvento('ricorrenze')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     FORM: DOCUMENTI
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-documenti">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#F0FDF4;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 32 32" fill="none" stroke="#16A34A" stroke-width="1.8"><rect x="3" y="8" width="26" height="16" rx="3"/><circle cx="10" cy="16" r="3"/><line x1="16" y1="13" x2="26" y2="13"/><line x1="16" y1="17" x2="24" y2="17"/><line x1="16" y1="21" x2="22" y2="21"/></svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Documento</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('documenti')">Salva</button>
+  </div>
+  <div class="scroll-body">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label>Tipo documento <span style="color:var(--col-scaduto)">*</span></label>
+        <select id="documenti-tipo">
+          <option value="">Seleziona…</option>
+          <option>Carta d'identità</option>
+          <option>Passaporto</option>
+          <option>Patente di guida</option>
+          <option>Tessera sanitaria</option>
+          <option>Permesso di soggiorno</option>
+          <option>Altro</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Data scadenza</label>
+        <button type="button" class="date-trigger" id="documenti-data-btn" onclick="openDatePicker('documenti-data','date')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="documenti-data-lbl">Scegli data</span>
+        </button>
+        <input type="hidden" id="documenti-data" value="">
+      </div>
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="documenti-note" placeholder="es. Rinnovo in comune, numero documento…"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-documenti"></div>
+      </div>
+      <button class="btn-primary" onclick="salvaEvento('documenti')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     FORM: AUTO
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-auto">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#EFF6FF;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 32 32" fill="none" stroke="#2563EB" stroke-width="1.8"><path d="M5 18 L8 12 Q9 10 12 10 L20 10 Q23 10 24 12 L27 18 Z"/><rect x="4" y="18" width="24" height="7" rx="2"/><circle cx="9" cy="25" r="2.5"/><circle cx="23" cy="25" r="2.5"/></svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Auto</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('auto')">Salva</button>
+  </div>
+  <div class="scroll-body">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label>Tipo scadenza <span style="color:var(--col-scaduto)">*</span></label>
+        <select id="auto-tipo">
+          <option value="">Seleziona…</option>
+          <option>Revisione (collaudo)</option>
+          <option>Bollo auto</option>
+          <option>Assicurazione</option>
+          <option>Tagliando / manutenzione</option>
+          <option>Cambio gomme</option>
+          <option>Altro</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Data scadenza</label>
+        <button type="button" class="date-trigger" id="auto-data-btn" onclick="openDatePicker('auto-data','date')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="auto-data-lbl">Scegli data</span>
+        </button>
+        <input type="hidden" id="auto-data" value="">
+      </div>
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="auto-note" placeholder="es. Officina, km attuali…"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-auto"></div>
+      </div>
+      <button class="btn-primary" onclick="salvaEvento('auto')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     FORM: IMPEGNO GENERICO
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-generico">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#F5F3FF;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 32 32" fill="none" stroke="#7C3AED" stroke-width="1.8"><rect x="4" y="15" width="24" height="3" rx="1.5"/><line x1="8" y1="18" x2="8" y2="26"/><line x1="24" y1="18" x2="24" y2="26"/><circle cx="10" cy="11" r="2.5"/><circle cx="22" cy="11" r="2.5"/><circle cx="16" cy="10" r="2.5"/></svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Impegno</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('generico')">Salva</button>
+  </div>
+  <div class="scroll-body">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label>Titolo <span style="color:var(--col-scaduto)">*</span></label>
+        <input type="text" id="generico-titolo" placeholder="es. Riunione condominio" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Data e ora</label>
+        <button type="button" class="date-trigger" id="generico-data-btn" onclick="openDatePicker('generico-data','datetime')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="generico-data-lbl">Scegli data e ora</span>
+        </button>
+        <input type="hidden" id="generico-data" value="">
+      </div>
+      <div class="form-group">
+        <label>Luogo (opzionale)</label>
+        <input type="text" id="generico-luogo" placeholder="es. Via Roma 12" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="generico-note" placeholder="Informazioni aggiuntive…"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-generico"></div>
+      </div>
+      <button class="btn-primary" onclick="salvaEvento('generico')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     FORM: ACQUISTI
+     ============================================================ -->
+<div class="screen hidden" id="screen-form-acquisti">
+  <div class="header">
+    <button class="header-back" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Categorie
+    </button>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="width:28px;height:28px;background:#FDF4FF;border-radius:8px;display:flex;align-items:center;justify-content:center">
+        <svg width="18" height="18" viewBox="0 0 32 32" fill="none" stroke="#9333EA" stroke-width="1.8"><path d="M4 5 L8 5 L12 20 L24 20 L27 11 L10 11"/><circle cx="13" cy="24" r="2"/><circle cx="22" cy="24" r="2"/></svg>
+      </div>
+      <span style="font-size:0.95rem;font-weight:700;color:var(--fg)">Acquisto</span>
+    </div>
+    <button class="btn-save-header" onclick="salvaEvento('acquisti')">Salva</button>
+  </div>
+  <div class="scroll-body">
+    <div class="form-wrap">
+      <div class="form-group">
+        <label>Cosa acquistare <span style="color:var(--col-scaduto)">*</span></label>
+        <input type="text" id="acquisti-titolo" placeholder="es. Antidolorifico, cibo per gatto…" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Entro quando (opzionale)</label>
+        <button type="button" class="date-trigger" id="acquisti-data-btn" onclick="openDatePicker('acquisti-data','date')">
+          <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="18" height="18"><rect x="3" y="4" width="18" height="18" rx="2"/><path stroke-linecap="round" d="M16 2v4M8 2v4M3 10h18"/></svg>
+          <span id="acquisti-data-lbl">Scegli data</span>
+        </button>
+        <input type="hidden" id="acquisti-data" value="">
+      </div>
+      <div class="form-group">
+        <label>Note (opzionale)</label>
+        <textarea id="acquisti-note" placeholder="es. Marca, quantità, dove comprare…"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Notifiche</label>
+        <div class="notif-block" id="notif-acquisti"></div>
+      </div>
+      <button class="btn-primary" onclick="salvaEvento('acquisti')">Salva impegno</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCHERMATA: LISTE
+     ============================================================ -->
+<div class="screen hidden" id="screen-liste">
+  <div class="header">
+    <h1>Liste</h1>
+    <div class="liste-header-actions">
+      <button class="btn-nuova-lista" onclick="apriNuovaLista()">
+        <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+        Nuova lista
+      </button>
+    </div>
+  </div>
+
+  <div class="scroll-body" id="liste-scroll">
+
+    <div id="liste-attive-wrap">
+      <!-- liste attive generate da JS -->
+    </div>
+
+    <div class="archivio-section">
+      <button class="archivio-toggle" id="btn-archivio-toggle" onclick="toggleArchivio()">
+        <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+        Archivio
+        <span id="archivio-count" style="font-weight:400;font-size:0.7rem;margin-left:2px"></span>
+      </button>
+      <div id="archivio-lista-list">
+        <!-- liste archiviate generate da JS -->
+      </div>
+    </div>
+
+  </div>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" onclick="goTo('liste')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+      <span>Liste</span>
+    </button>
+    <button class="fab" onclick="goTo('nuovo')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+    </button>
+    <button class="nav-btn" onclick="goTo('utente')">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+      <span>Profilo</span>
+    </button>
+  </nav>
+</div>
+
+
+<!-- ============================================================
+     SCHERMATA: DETTAGLIO LISTA
+     ============================================================ -->
+<div class="screen hidden" id="screen-lista-dettaglio">
+  <div class="header">
+    <button class="header-back" onclick="goTo('liste')">
+      <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/></svg>
+      Liste
+    </button>
+    <span id="lista-dettaglio-title" style="font-size:0.95rem;font-weight:700;color:var(--fg);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    <div style="width:60px"></div>
+  </div>
+
+  <div class="scroll-body" id="lista-dettaglio-scroll">
+
+    <div class="todo-add-row">
+      <input type="text" id="todo-new-input" placeholder="Aggiungi voce…" autocomplete="off"
+             onkeydown="if(event.key==='Enter') aggiungiTodo()">
+      <button class="todo-add-btn" onclick="aggiungiTodo()">
+        <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+      </button>
+    </div>
+
+    <div id="todo-aperte-wrap"></div>
+    <div id="todo-chiuse-sep" class="todo-section-sep" style="display:none">Completate</div>
+    <div id="todo-chiuse-wrap"></div>
+
+    <div class="lista-actions">
+      <button class="btn-archivia" onclick="archiviaListaCorrente()">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2L19 8"/></svg>
+        Archivia lista
+      </button>
+      <button class="btn-elimina-lista" onclick="chiediEliminaLista()">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        Elimina
+      </button>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- MODAL CONFERMA ELIMINA -->
+<div class="modal-overlay" id="modal-elimina" onclick="chiudiModal()">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <div class="modal-title">Elimina lista</div>
+    <div class="modal-body" id="modal-elimina-body">Eliminare definitivamente questa lista? L'operazione non può essere annullata.</div>
+    <div class="modal-btns">
+      <button class="modal-cancel" onclick="chiudiModal()">Annulla</button>
+      <button class="modal-confirm" id="modal-confirm-btn">Elimina</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL NUOVA LISTA -->
+<div class="modal-overlay" id="modal-nuova" onclick="chiudiModalNuova()">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <div class="modal-title">Nuova lista</div>
+    <div style="margin-bottom:16px">
+      <input type="text" id="nuova-lista-nome" placeholder="Nome lista…" autocomplete="off"
+             style="width:100%;background:var(--bg-card);border:1.5px solid var(--border);border-radius:var(--radius-s);padding:12px 14px;font-size:0.95rem;color:var(--fg);font-family:inherit"
+             onkeydown="if(event.key==='Enter') confermaNuovaLista()">
+    </div>
+    <div class="modal-btns">
+      <button class="modal-cancel" onclick="chiudiModalNuova()">Annulla</button>
+      <button class="modal-confirm" style="background:var(--accent)" onclick="confermaNuovaLista()">Crea</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" style="
+  position:fixed;bottom:88px;left:50%;transform:translateX(-50%) translateY(20px);
+  background:#1A1D23;color:#fff;padding:10px 20px;border-radius:24px;
+  font-size:0.85rem;font-weight:600;white-space:nowrap;
+  opacity:0;transition:all 0.25s;pointer-events:none;z-index:100;
+  box-shadow:0 4px 20px rgba(0,0,0,.25)
+"></div>
+
+
+<script>
+const screens = {
+  home:                 'screen-home',
+  nuovo:                'screen-nuovo',
+  'form-visite':        'screen-form-visite',
+  'form-farmaci':       'screen-form-farmaci',
+  'form-ricorrenze':    'screen-form-ricorrenze',
+  'form-documenti':     'screen-form-documenti',
+  'form-auto':          'screen-form-auto',
+  'form-generico':      'screen-form-generico',
+  'form-acquisti':      'screen-form-acquisti',
+  liste:                'screen-liste',
+  'lista-dettaglio':    'screen-lista-dettaglio',
+  utente:               'screen-utente',
+};
+let current = 'home';
+
+function goTo(name) {
+  if (!screens[name] || name === current) return;
+  const prev = document.getElementById(screens[current]);
+  const next = document.getElementById(screens[name]);
+  prev.classList.add('hidden');
+  next.classList.remove('hidden');
+  current = name;
+  if (name === 'home') {
+    scrollPrimoOggi();
+  }
+  if (name === 'liste') {
+    renderListe();
+  }
+  // init blocchi notifiche
+  const formMap = {
+    'form-visite':    'visite',
+    'form-farmaci':   'farmaci',
+    'form-ricorrenze':'ricorrenze',
+    'form-documenti': 'documenti',
+    'form-auto':      'auto',
+    'form-generico':  'generico',
+    'form-acquisti':  'acquisti',
+  };
+  if (formMap[name]) initNotif(formMap[name]);
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.opacity = '1';
+  t.style.transform = 'translateX(-50%) translateY(0)';
+  setTimeout(() => {
+    t.style.opacity = '0';
+    t.style.transform = 'translateX(-50%) translateY(20px)';
+  }, 2500);
+}
+
+function setFreq(btn, months) {
+  btn.closest('.backup-freq').querySelectorAll('.freq-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// === LOGICA ORARI FARMACI ===
+function aggiornaOrari() {
+  const freq = document.getElementById('freq-select').value;
+  const orariWrap = document.getElementById('orari-wrap');
+  const alterneWrap = document.getElementById('alterne-wrap');
+  const customWrap = document.getElementById('custom-wrap');
+
+  orariWrap.style.display = 'flex';
+  alterneWrap.style.display = 'none';
+  customWrap.style.display = 'none';
+  orariWrap.innerHTML = '';
+
+  if (freq === 'alterne') {
+    orariWrap.style.display = 'none';
+    alterneWrap.style.display = 'flex';
+    return;
+  }
+  if (freq === 'custom') {
+    orariWrap.style.display = 'none';
+    customWrap.style.display = 'block';
+    return;
+  }
+
+  // orario base (sempre editabile)
+  const baseInput = document.createElement('input');
+  baseInput.type = 'time';
+  baseInput.value = '08:00';
+  baseInput.className = 'form-group input time-primary';
+  baseInput.style.cssText = 'flex:1;min-width:80px';
+  baseInput.id = 'time-base';
+
+  if (freq === '1') {
+    // solo 1 campo
+    const w = mkWrap('1ª dose', baseInput, false);
+    orariWrap.appendChild(w);
+    return;
+  }
+
+  // per frequenze con intervallo fisso o multiplo
+  let intervalloOre = null;
+  let count = parseInt(freq);
+
+  if (freq === '8')  { intervalloOre = 8;  count = 3; }
+  if (freq === '12') { intervalloOre = 12; count = 2; }
+
+  baseInput.addEventListener('input', () => ricalcolaCalcolati(intervalloOre, count));
+
+  const w0 = mkWrap('1ª dose', baseInput, false);
+  orariWrap.appendChild(w0);
+
+  for (let i = 1; i < count; i++) {
+    const inp = document.createElement('input');
+    inp.type = 'time';
+    inp.className = 'time-calculated';
+    inp.style.cssText = 'flex:1;min-width:80px;width:100%;padding:12px 14px;border-radius:8px;border:1.5px solid;font-size:0.95rem;font-family:inherit';
+    inp.readOnly = true;
+    inp.id = 'time-calc-' + i;
+    inp.title = 'Calcolato automaticamente';
+    const label = ordinale(i + 1) + ' dose';
+    orariWrap.appendChild(mkWrap(label, inp, true));
+  }
+
+  ricalcolaCalcolati(intervalloOre, count);
+}
+
+function ricalcolaCalcolati(intervallo, count) {
+  const base = document.getElementById('time-base');
+  if (!base) return;
+  const [hh, mm] = base.value.split(':').map(Number);
+  const baseMin = hh * 60 + mm;
+  // se non c'è intervallo fisso, distribuisce equamente nelle 24h
+  const step = intervallo ? intervallo * 60 : Math.round(1440 / count);
+  for (let i = 1; i < count; i++) {
+    const el = document.getElementById('time-calc-' + i);
+    if (!el) continue;
+    const tot = (baseMin + step * i) % 1440;
+    const h = String(Math.floor(tot / 60)).padStart(2, '0');
+    const m = String(tot % 60).padStart(2, '0');
+    el.value = h + ':' + m;
+  }
+}
+
+function mkWrap(labelTxt, input, calcolato) {
+  const w = document.createElement('div');
+  w.className = 'time-wrap';
+  const lbl = document.createElement('span');
+  lbl.className = 'time-wrap-label';
+  lbl.textContent = labelTxt + (calcolato ? ' ⟳' : '');
+  w.appendChild(lbl);
+  w.appendChild(input);
+  return w;
+}
+
+function ordinale(n) {
+  return n + (n === 2 ? 'ª' : n === 3 ? 'ª' : 'ª');
+}
+
+function mostraFoto(input) {
+  if (!input.files || !input.files[0]) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const prev = document.getElementById('foto-preview');
+    const area = document.getElementById('foto-area');
+    prev.src = e.target.result;
+    prev.style.display = 'block';
+    area.style.display = 'none';
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+function salvaFarmaco() {
+  const nome = document.getElementById('farmaco-nome');
+  let ok = true;
+  // rimuovi errori precedenti
+  document.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
+  document.querySelectorAll('.field-error-msg').forEach(el => el.remove());
+
+  if (!nome.value.trim()) {
+    nome.classList.add('field-error');
+    const msg = document.createElement('div');
+    msg.className = 'field-error-msg';
+    msg.textContent = 'Campo obbligatorio';
+    nome.parentNode.appendChild(msg);
+    nome.focus();
+    ok = false;
+  }
+  if (ok) {
+    showToast('Farmaco salvato ✓');
+    goTo('home');
+  }
+}
+
+// inizializza al caricamento
+window.addEventListener('load', () => {
+  aggiornaOrari();
+});
+
+// scroll al primo evento "oggi" dopo render home
+function scrollPrimoOggi() {
+  setTimeout(() => {
+    const card = document.querySelector('.ev-prossimo');
+    if (card) card.scrollIntoView({behavior:'smooth', block:'center'});
+  }, 320);
+}
+
+// ============================================================
+// GESTIONE LISTE — localStorage
+// ============================================================
+
+const LS_KEY = 'agendame_liste';
+
+function leggiListe() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY)) || []; }
+  catch { return []; }
+}
+
+function salvaListe(liste) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(liste)); }
+  catch { showToast('Spazio insufficiente sul dispositivo'); }
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+// ---- render schermata Liste ----
+function renderListe() {
+  const liste = leggiListe();
+  const attive   = liste.filter(l => !l.archiviata);
+  const archivio = liste.filter(l =>  l.archiviata);
+
+  // attive
+  const wrapAttive = document.getElementById('liste-attive-wrap');
+  if (attive.length === 0) {
+    wrapAttive.innerHTML = '<div style="text-align:center;color:var(--fg-3);font-size:0.88rem;padding:40px 0">Nessuna lista. Creane una!</div>';
+  } else {
+    wrapAttive.innerHTML = '';
+    attive.forEach(l => wrapAttive.appendChild(buildListaCard(l, false)));
+  }
+
+  // archivio
+  const wrapArch = document.getElementById('archivio-lista-list');
+  const countEl  = document.getElementById('archivio-count');
+  countEl.textContent = archivio.length ? '(' + archivio.length + ')' : '';
+  if (archivio.length === 0) {
+    wrapArch.innerHTML = '<div style="text-align:center;color:var(--fg-3);font-size:0.82rem;padding:12px 0 16px">Nessuna lista archiviata</div>';
+  } else {
+    wrapArch.innerHTML = '';
+    archivio.forEach(l => wrapArch.appendChild(buildListaCard(l, true)));
+  }
+}
+
+function buildListaCard(lista, archiviata) {
+  const aperte  = lista.voci.filter(v => !v.done).length;
+  const totale  = lista.voci.length;
+
+  const card = document.createElement('div');
+  card.className = 'lista-card' + (archiviata ? ' archiviata' : '');
+  card.onclick = () => apriDettaglioLista(lista.id);
+
+  card.innerHTML = `
+    <div class="lista-card-icon">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
+      </svg>
+    </div>
+    <div class="lista-card-body">
+      <div class="lista-card-name">${escHtml(lista.nome)}</div>
+      <div class="lista-card-meta">${archiviata ? 'Archiviata il ' + formatData(lista.archiviatail) : (totale === 0 ? 'Vuota' : totale + ' voci')}</div>
+    </div>
+    <span class="lista-card-badge ${aperte === 0 ? 'zero' : ''}">${aperte > 0 ? aperte + ' aperte' : '✓ tutto fatto'}</span>
+  `;
+  return card;
+}
+
+// ---- nuova lista ----
+function apriNuovaLista() {
+  const m = document.getElementById('modal-nuova');
+  document.getElementById('nuova-lista-nome').value = '';
+  m.classList.add('open');
+  setTimeout(() => document.getElementById('nuova-lista-nome').focus(), 200);
+}
+
+function chiudiModalNuova() {
+  document.getElementById('modal-nuova').classList.remove('open');
+}
+
+function confermaNuovaLista() {
+  const nome = document.getElementById('nuova-lista-nome').value.trim();
+  if (!nome) { document.getElementById('nuova-lista-nome').focus(); return; }
+  chiudiModalNuova();
+  const liste = leggiListe();
+  const nuova = { id: uid(), nome, voci: [], creata: Date.now(), archiviata: false };
+  liste.unshift(nuova);
+  salvaListe(liste);
+  apriDettaglioLista(nuova.id);
+}
+
+// ---- dettaglio lista ----
+let listaCorrenteId = null;
+
+function apriDettaglioLista(id) {
+  listaCorrenteId = id;
+  renderDettaglio();
+  goTo('lista-dettaglio');
+}
+
+function renderDettaglio() {
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaCorrenteId);
+  if (!lista) { goTo('liste'); return; }
+
+  document.getElementById('lista-dettaglio-title').textContent = lista.nome;
+  document.getElementById('todo-new-input').value = '';
+
+  const aperte  = lista.voci.filter(v => !v.done);
+  const chiuse  = lista.voci.filter(v =>  v.done);
+
+  const wAperte = document.getElementById('todo-aperte-wrap');
+  const wChiuse = document.getElementById('todo-chiuse-wrap');
+  const sep     = document.getElementById('todo-chiuse-sep');
+
+  wAperte.innerHTML = '';
+  wChiuse.innerHTML = '';
+
+  if (aperte.length === 0 && chiuse.length === 0) {
+    wAperte.innerHTML = '<div style="text-align:center;color:var(--fg-3);font-size:0.88rem;padding:24px 0">Nessuna voce. Aggiungine una!</div>';
+  }
+
+  aperte.forEach(v => wAperte.appendChild(buildTodoItem(v, lista)));
+  sep.style.display = chiuse.length > 0 ? 'block' : 'none';
+  chiuse.forEach(v => wChiuse.appendChild(buildTodoItem(v, lista)));
+
+  // disabilita "Archivia" se già archiviata
+  const btnArch = document.querySelector('.btn-archivia');
+  if (btnArch) {
+    btnArch.disabled = lista.archiviata;
+    btnArch.style.opacity = lista.archiviata ? '0.4' : '1';
+    btnArch.textContent = lista.archiviata ? '✓ Archiviata' : '';
+    if (!lista.archiviata) {
+      btnArch.innerHTML = '<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8l1 12a2 2 0 002 2h8a2 2 0 002-2L19 8"/></svg> Archivia lista';
+    }
+  }
+}
+
+function buildTodoItem(voce, lista) {
+  const div = document.createElement('div');
+  div.className = 'todo-item' + (voce.done ? ' done' : '');
+  div.dataset.id = voce.id;
+
+  div.innerHTML = `
+    <div class="todo-checkbox ${voce.done ? 'checked' : ''}" onclick="toggleTodo('${lista.id}','${voce.id}')">
+      <svg fill="none" stroke="currentColor" stroke-width="3" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+      </svg>
+    </div>
+    <span class="todo-text">${escHtml(voce.testo)}</span>
+    <button class="todo-del" onclick="eliminaTodo('${lista.id}','${voce.id}')" title="Elimina">
+      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+      </svg>
+    </button>
+  `;
+  return div;
+}
+
+function aggiungiTodo() {
+  const input = document.getElementById('todo-new-input');
+  const testo = input.value.trim();
+  if (!testo) return;
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaCorrenteId);
+  if (!lista) return;
+  lista.voci.push({ id: uid(), testo, done: false, creata: Date.now() });
+  salvaListe(liste);
+  input.value = '';
+  renderDettaglio();
+  input.focus();
+}
+
+function toggleTodo(listaId, voceId) {
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaId);
+  if (!lista) return;
+  const voce = lista.voci.find(v => v.id === voceId);
+  if (voce) { voce.done = !voce.done; voce.chiusail = voce.done ? Date.now() : null; }
+  salvaListe(liste);
+  renderDettaglio();
+}
+
+function eliminaTodo(listaId, voceId) {
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaId);
+  if (!lista) return;
+  lista.voci = lista.voci.filter(v => v.id !== voceId);
+  salvaListe(liste);
+  renderDettaglio();
+}
+
+// ---- archivia ----
+function archiviaListaCorrente() {
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaCorrenteId);
+  if (!lista || lista.archiviata) return;
+  lista.archiviata = true;
+  lista.archiviatail = Date.now();
+  salvaListe(liste);
+  showToast('Lista archiviata ✓');
+  goTo('liste');
+}
+
+// ---- elimina ----
+function chiediEliminaLista() {
+  const liste = leggiListe();
+  const lista = liste.find(l => l.id === listaCorrenteId);
+  if (!lista) return;
+  document.getElementById('modal-elimina-body').textContent =
+    'Eliminare definitivamente "' + lista.nome + '"? L\'operazione non può essere annullata.';
+  document.getElementById('modal-confirm-btn').onclick = confermaEliminaLista;
+  document.getElementById('modal-elimina').classList.add('open');
+}
+
+function chiudiModal() {
+  document.getElementById('modal-elimina').classList.remove('open');
+}
+
+function confermaEliminaLista() {
+  chiudiModal();
+  const liste = leggiListe();
+  const nuove = liste.filter(l => l.id !== listaCorrenteId);
+  salvaListe(nuove);
+  showToast('Lista eliminata');
+  listaCorrenteId = null;
+  goTo('liste');
+}
+
+// ---- archivio toggle ----
+function toggleArchivio() {
+  const btn  = document.getElementById('btn-archivio-toggle');
+  const list = document.getElementById('archivio-lista-list');
+  btn.classList.toggle('open');
+  list.classList.toggle('open');
+}
+
+// ============================================================
+// SISTEMA NOTIFICHE INTERATTIVE
+// ============================================================
+
+// Struttura notifica: { id, desc, time, on }
+// "time" per farmaci è 'auto' = agli orari di assunzione
+
+const notifStati = {}; // formId -> [notifica, ...]
+
+const NOTIF_DEFAULTS = {
+  'visite': [
+    { desc: '1 settimana prima', time: '18:00', on: true },
+    { desc: 'Sera prima',        time: '20:00', on: true },
+    { desc: 'Mattina stessa',    time: '07:00', on: true },
+  ],
+  'farmaci': [
+    { desc: 'Agli orari di assunzione', time: null, on: true },
+  ],
+  'ricorrenze': [
+    { desc: 'Giorno stesso',     time: '08:00', on: true },
+  ],
+  'documenti': [
+    { desc: '1 mese prima',      time: '09:00', on: true },
+    { desc: 'Giorno prima',      time: '18:00', on: true },
+    { desc: 'Mattina scadenza',  time: '09:00', on: true },
+  ],
+  'auto': [
+    { desc: '1 mese prima',      time: '09:00', on: true },
+    { desc: 'Giorno prima',      time: '18:00', on: true },
+    { desc: 'Giorno scadenza',   time: '09:00', on: true },
+  ],
+  'generico': [
+    { desc: 'Sera prima',        time: '20:00', on: true },
+    { desc: '1 ora prima',       time: null,    on: true },
+  ],
+  'acquisti': [
+    { desc: 'Giorno stabilito',  time: '09:00', on: true },
+  ],
+};
+
+function initNotif(formId) {
+  if (!notifStati[formId]) {
+    notifStati[formId] = (NOTIF_DEFAULTS[formId] || []).map((n, i) => ({
+      id: formId + '_' + i,
+      desc: n.desc,
+      time: n.time,
+      on: n.on,
+    }));
+  }
+  renderNotifBlock(formId);
+}
+
+function renderNotifBlock(formId) {
+  const el = document.getElementById('notif-' + formId);
+  if (!el) return;
+  const lista = notifStati[formId] || [];
+  el.innerHTML = '';
+
+  lista.forEach(n => {
+    const item = document.createElement('div');
+    item.className = 'notif-item' + (n.on ? '' : ' off');
+    item.dataset.nid = n.id;
+
+    // toggle
+    const tog = document.createElement('button');
+    tog.className = 'notif-toggle' + (n.on ? ' on' : '');
+    tog.title = n.on ? 'Disattiva' : 'Attiva';
+    tog.onclick = () => { n.on = !n.on; renderNotifBlock(formId); };
+
+    // desc — editabile se notifica custom (non nei default)
+    const isDefault = (NOTIF_DEFAULTS[formId] || []).some(d => d.desc === n.desc);
+    let desc;
+    if (isDefault) {
+      desc = document.createElement('span');
+      desc.className = 'notif-desc';
+      desc.textContent = n.desc;
+    } else {
+      desc = document.createElement('input');
+      desc.type = 'text';
+      desc.className = 'notif-desc';
+      desc.value = n.desc;
+      desc.placeholder = 'Descrizione…';
+      desc.style.cssText = 'background:transparent;border:none;outline:none;font-size:0.84rem;font-weight:500;color:var(--fg);min-width:0;flex:1';
+      desc.oninput = (e) => { n.desc = e.target.value; };
+    }
+
+    item.appendChild(tog);
+    item.appendChild(desc);
+
+    // time trigger button (se ha orario) oppure cella vuota
+    if (n.time !== null) {
+      const ti = document.createElement('button');
+      ti.type = 'button';
+      ti.className = 'notif-time-btn';
+      ti.dataset.notifTimebtn = n.id;
+      ti.innerHTML = '<span>' + (n.time || '09:00') + '</span>';
+      ti.onclick = () => openNotifTimePicker(n.id, formId);
+      item.appendChild(ti);
+    } else {
+      // nessun orario (es. farmaci) — occupa la colonna con span vuoto
+      const ph = document.createElement('span');
+      item.appendChild(ph);
+    }
+
+    // delete
+    const del = document.createElement('button');
+    del.className = 'notif-del';
+    del.title = 'Rimuovi';
+    del.innerHTML = '<svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>';
+    del.onclick = () => {
+      notifStati[formId] = notifStati[formId].filter(x => x.id !== n.id);
+      renderNotifBlock(formId);
+    };
+    item.appendChild(del);
+
+    el.appendChild(item);
+  });
+
+  // bottone aggiungi
+  const add = document.createElement('button');
+  add.className = 'notif-add-btn';
+  add.innerHTML = '<svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg> Aggiungi notifica';
+  add.onclick = () => aggiungiNotifica(formId);
+  el.appendChild(add);
+}
+
+function aggiungiNotifica(formId) {
+  if (!notifStati[formId]) notifStati[formId] = [];
+  const id = formId + '_' + Date.now();
+  notifStati[formId].push({ id, desc: 'Nuova notifica', time: '09:00', on: true });
+  renderNotifBlock(formId);
+  // mette focus sul campo desc dell'ultimo item aggiunto
+  // (non facile su mobile, lasciamo l'utente toccare)
+}
+
+// ---- utils ----
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatData(ts) {
+  if (!ts) return '';
+  return new Date(ts).toLocaleDateString('it-IT', {day:'numeric', month:'short', year:'numeric'});
+}
+
+// ============================================================
+// GESTIONE EVENTI — localStorage
+// ============================================================
+
+const LS_EVENTI = 'agendame_eventi';
+let eventoInModifica = null; // id evento in modifica, null = nuovo
+let mostraCompletati = false;
+
+function leggiEventi() {
+  try { return JSON.parse(localStorage.getItem(LS_EVENTI)) || []; }
+  catch { return []; }
+}
+
+function salvaEventiLS(eventi) {
+  try { localStorage.setItem(LS_EVENTI, JSON.stringify(eventi)); }
+  catch { showToast('Spazio insufficiente sul dispositivo'); }
+}
+
+// Restituisce la "data principale" di un evento come stringa ISO yyyy-mm-dd o datetime
+function dataEvento(ev) {
+  const extra = ev.extra || {};
+  return extra.data || extra.dataInizio || null;
+}
+
+// Classifica temporale dell'evento
+function classificaEvento(ev) {
+  const d = dataEvento(ev);
+  if (!d) return 'futuro';
+  const oggi = new Date(); oggi.setHours(0,0,0,0);
+  const domani = new Date(oggi); domani.setDate(domani.getDate()+1);
+  const sett = new Date(oggi); sett.setDate(sett.getDate()+7);
+  const data = new Date(d); data.setHours(0,0,0,0);
+  if (data < oggi) return 'sospeso';
+  if (data.getTime() === oggi.getTime()) return 'oggi';
+  if (data.getTime() === domani.getTime()) return 'domani';
+  if (data <= sett) return 'settimana';
+  return 'futuro';
+}
+
+// Badge categoria
+const CAT_LABELS = {
+  visite:'Visita', farmaci:'Farmaco', ricorrenze:'Ricorrenza',
+  documenti:'Documento', auto:'Auto', generico:'Impegno', acquisti:'Acquisto'
+};
+
+function fmtDataEvento(ev) {
+  const d = dataEvento(ev);
+  if (!d) return '';
+  const dt = new Date(d);
+  const cls = classificaEvento(ev);
+  if (cls === 'oggi') return 'Oggi' + (d.includes('T') ? ' · ' + dt.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}) : '');
+  if (cls === 'domani') return 'Domani' + (d.includes('T') ? ' · ' + dt.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}) : '');
+  const giorni = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
+  const mesi = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+  let s = giorni[dt.getDay()] + ' ' + dt.getDate() + ' ' + mesi[dt.getMonth()] + ' ' + dt.getFullYear();
+  if (d.includes('T')) s += ' · ' + dt.toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'});
+  return s;
+}
+
+function titoloCarta(ev) {
+  const e = ev.extra || {};
+  return e.titolo || e.tipo || e.nome || '—';
+}
+
+function renderHome() {
+  const lista = document.getElementById('home-list');
+  if (!lista) return;
+  const eventi = leggiEventi().filter(ev => mostraCompletati || ev.stato !== 'fatto');
+
+  // toggle completati in cima
+  const completati = leggiEventi().filter(ev => ev.stato === 'fatto').length;
+  let html = `<div style="display:flex;align-items:center;justify-content:flex-end;padding:4px 16px 2px;gap:8px">
+    <span style="font-size:0.8rem;color:var(--fg-3)">${completati} completat${completati===1?'o':'i'}</span>
+    <button onclick="mostraCompletati=!mostraCompletati;renderHome()"
+      style="font-size:0.78rem;font-weight:700;color:var(--accent);background:none;border:none;cursor:pointer;padding:4px 0">
+      ${mostraCompletati ? 'Nascondi' : 'Mostra'}
+    </button>
+  </div>`;
+
+  const gruppi = [
+    { key:'sospeso', label:'In sospeso', cls:'ev-scaduto' },
+    { key:'oggi',    label:'Oggi',       cls:'ev-prossimo' },
+    { key:'domani',  label:'Domani',     cls:'ev-domani' },
+    { key:'settimana',label:'Questa settimana', cls:'ev-settimana' },
+    { key:'futuro',  label:'Prossimi',   cls:'' },
+  ];
+
+  if (mostraCompletati) {
+    gruppi.push({ key:'fatto', label:'Completati', cls:'ev-passato' });
+  }
+
+  let trovati = false;
+  for (const g of gruppi) {
+    const items = g.key === 'fatto'
+      ? leggiEventi().filter(ev => ev.stato === 'fatto')
+      : eventi.filter(ev => ev.stato !== 'fatto' && classificaEvento(ev) === g.key);
+    if (!items.length) continue;
+    trovati = true;
+    html += `<div class="section-label">${g.label}</div>`;
+    for (const ev of items) {
+      const badge = CAT_LABELS[ev.categoria] || ev.categoria;
+      const dataStr = fmtDataEvento(ev);
+      html += `<div class="event-card ${g.cls}" onclick="apriEvento('${ev.id}')">
+        <div class="event-dot"></div>
+        <div class="event-body">
+          <div class="event-title">${escHTML(titoloCarta(ev))}</div>
+          <div class="event-meta">
+            ${dataStr ? `<span class="event-date">${escHTML(dataStr)}</span>` : ''}
+            <span class="event-cat-badge">${badge}</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+          ${ev.stato !== 'fatto' ? `<button class="ev-done-btn" onclick="event.stopPropagation();segnaFatto('${ev.id}')" title="Segna come fatto">
+            <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          </button>` : '<span style="font-size:0.72rem;color:var(--fg-3);white-space:nowrap">✓ Fatto</span>'}
+          <button class="ev-del-btn" onclick="event.stopPropagation();eliminaEvento('${ev.id}')" title="Elimina">
+            <svg fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+          </button>
+        </div>
+      </div>`;
+    }
+  }
+
+  if (!trovati) {
+    html += `<div style="text-align:center;padding:60px 20px;color:var(--fg-3)">
+      <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24" style="margin:0 auto 12px;display:block"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+      <div style="font-weight:700;font-size:1rem;margin-bottom:6px">Nessun impegno</div>
+      <div style="font-size:0.85rem">Tocca + per aggiungerne uno</div>
+    </div>`;
+  }
+
+  lista.innerHTML = html;
+}
+
+function escHTML(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+let _undoElimina = null;
+
+function eliminaEvento(id) {
+  const eventi = leggiEventi();
+  const idx = eventi.findIndex(e => e.id === id);
+  if (idx === -1) return;
+  _undoElimina = { ev: eventi[idx], idx };
+  eventi.splice(idx, 1);
+  salvaEventiLS(eventi);
+  renderHome();
+  // toast con undo
+  const t = document.getElementById('toast');
+  t.innerHTML = 'Eliminato <button onclick="undoElimina()" style="margin-left:10px;font-weight:800;color:#60A5FA;background:none;border:none;cursor:pointer;font-size:inherit">Annulla</button>';
+  t.style.opacity = '1';
+  t.style.transform = 'translateX(-50%) translateY(0)';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => {
+    t.style.opacity = '0';
+    t.style.transform = 'translateX(-50%) translateY(20px)';
+    _undoElimina = null;
+  }, 4000);
+}
+
+function undoElimina() {
+  if (!_undoElimina) return;
+  const eventi = leggiEventi();
+  eventi.splice(_undoElimina.idx, 0, _undoElimina.ev);
+  salvaEventiLS(eventi);
+  _undoElimina = null;
+  renderHome();
+  const t = document.getElementById('toast');
+  t.style.opacity = '0';
+  clearTimeout(t._timer);
+  showToast('Ripristinato ✓');
+}
+
+function segnaFatto(id) {
+  const eventi = leggiEventi();
+  const ev = eventi.find(e => e.id === id);
+  if (!ev) return;
+  ev.stato = 'fatto';
+  ev.fattaIl = Date.now();
+  salvaEventiLS(eventi);
+  renderHome();
+  showToast('Segnato come fatto ✓');
+}
+
+function apriEvento(id) {
+  const eventi = leggiEventi();
+  const ev = eventi.find(e => e.id === id);
+  if (!ev) return;
+  eventoInModifica = id;
+  caricaFormEvento(ev);
+  goTo('form-' + ev.categoria);
+}
+
+function caricaFormEvento(ev) {
+  const e = ev.extra || {};
+  const cat = ev.categoria;
+  // reset errori
+  document.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
+  document.querySelectorAll('.field-error-msg').forEach(el => el.remove());
+
+  const set = (id, val) => { const el = document.getElementById(id); if (el && val !== undefined) el.value = val || ''; };
+
+  if (cat === 'visite') {
+    set('visite-tipo', e.tipo); set('visite-data', e.data); set('visite-luogo', e.luogo); set('visite-note', e.note);
+  } else if (cat === 'farmaci') {
+    set('farmaco-nome', e.nome); set('farmaci-data', e.data);
+  } else if (cat === 'ricorrenze') {
+    set('ricorrenze-nome', e.nome); set('ricorrenze-data', e.data); set('ricorrenze-note', e.note);
+  } else if (cat === 'documenti') {
+    set('documenti-tipo', e.tipo); set('documenti-data', e.data); set('documenti-note', e.note);
+  } else if (cat === 'auto') {
+    set('auto-tipo', e.tipo); set('auto-data', e.data); set('auto-note', e.note);
+  } else if (cat === 'generico') {
+    set('generico-titolo', e.titolo); set('generico-data', e.data); set('generico-luogo', e.luogo); set('generico-note', e.note);
+  } else if (cat === 'acquisti') {
+    set('acquisti-titolo', e.titolo); set('acquisti-data', e.data); set('acquisti-note', e.note);
+  }
+}
+
+function raccogliCampiEvento(cat) {
+  const val = id => (document.getElementById(id) || {}).value || '';
+  if (cat === 'visite')     return { titolo: val('visite-tipo') || 'Visita medica', tipo: val('visite-tipo'), data: val('visite-data'), luogo: val('visite-luogo'), note: val('visite-note') };
+  if (cat === 'farmaci')    return { titolo: val('farmaco-nome') || 'Farmaco', nome: val('farmaco-nome'), data: val('farmaci-data') };
+  if (cat === 'ricorrenze') return { titolo: val('ricorrenze-nome') || 'Ricorrenza', nome: val('ricorrenze-nome'), data: val('ricorrenze-data'), note: val('ricorrenze-note') };
+  if (cat === 'documenti')  return { titolo: val('documenti-tipo') || 'Documento', tipo: val('documenti-tipo'), data: val('documenti-data'), note: val('documenti-note') };
+  if (cat === 'auto')       return { titolo: val('auto-tipo') || 'Auto', tipo: val('auto-tipo'), data: val('auto-data'), note: val('auto-note') };
+  if (cat === 'generico')   return { titolo: val('generico-titolo') || 'Impegno', titolo: val('generico-titolo'), data: val('generico-data'), luogo: val('generico-luogo'), note: val('generico-note') };
+  if (cat === 'acquisti')   return { titolo: val('acquisti-titolo') || 'Acquisto', data: val('acquisti-data'), note: val('acquisti-note') };
+  return {};
+}
+
+function salvaEvento(cat) {
+  // validazione campo obbligatorio
+  const campoObb = {
+    visite: 'visite-tipo', farmaci: 'farmaco-nome', ricorrenze: 'ricorrenze-nome',
+    documenti: 'documenti-tipo', auto: 'auto-tipo', generico: 'generico-titolo', acquisti: 'acquisti-titolo'
+  };
+  const idObb = campoObb[cat];
+  document.querySelectorAll('.field-error').forEach(el => el.classList.remove('field-error'));
+  document.querySelectorAll('.field-error-msg').forEach(el => el.remove());
+  if (idObb) {
+    const el = document.getElementById(idObb);
+    if (el && !el.value.trim()) {
+      el.classList.add('field-error');
+      const msg = document.createElement('div');
+      msg.className = 'field-error-msg';
+      msg.textContent = 'Campo obbligatorio';
+      el.parentNode.appendChild(msg);
+      el.focus();
+      return;
+    }
+  }
+
+  const extra = raccogliCampiEvento(cat);
+  const eventi = leggiEventi();
+
+  if (eventoInModifica) {
+    const idx = eventi.findIndex(e => e.id === eventoInModifica);
+    if (idx !== -1) {
+      eventi[idx].extra = extra;
+      eventi[idx].notifiche = notifStati[cat] ? [...notifStati[cat]] : [];
+    }
+    showToast('Impegno aggiornato ✓');
+  } else {
+    const nuovoEv = {
+      id: uid(),
+      categoria: cat,
+      stato: 'aperto',
+      creatoIl: Date.now(),
+      extra,
+      notifiche: notifStati[cat] ? [...notifStati[cat]] : [],
+    };
+    eventi.unshift(nuovoEv);
+    showToast('Impegno salvato ✓');
+  }
+
+  salvaEventiLS(eventi);
+  eventoInModifica = null;
+  resetForm(cat);
+  goTo('home');
+}
+
+function resetForm(cat) {
+  const ids = {
+    visite: ['visite-tipo','visite-data','visite-luogo','visite-note'],
+    farmaci: ['farmaco-nome','farmaci-data'],
+    ricorrenze: ['ricorrenze-nome','ricorrenze-data','ricorrenze-note'],
+    documenti: ['documenti-tipo','documenti-data','documenti-note'],
+    auto: ['auto-tipo','auto-data','auto-note'],
+    generico: ['generico-titolo','generico-data','generico-luogo','generico-note'],
+    acquisti: ['acquisti-titolo','acquisti-data','acquisti-note'],
+  };
+  (ids[cat] || []).forEach(id => { const el = document.getElementById(id); if (el) { el.value = ''; if (el.tagName === 'SELECT') el.selectedIndex = 0; } });
+  delete notifStati[cat]; // forza reinit defaults al prossimo accesso
+}
+
+// === ORARI CUSTOM FARMACI ===
+function aggiornaOrariCustom() {
+  const prima = document.getElementById('custom-prima-dose');
+  const nDosi = document.getElementById('custom-n-dosi');
+  const output = document.getElementById('custom-orari-calcolati');
+  if (!prima || !nDosi || !output) return;
+  const [hh, mm] = prima.value.split(':').map(Number);
+  const n = Math.max(1, Math.min(24, parseInt(nDosi.value) || 1));
+  const step = Math.round(1440 / n);
+  const orari = [];
+  for (let i = 0; i < n; i++) {
+    const tot = ((hh * 60 + mm) + step * i) % 1440;
+    orari.push(String(Math.floor(tot/60)).padStart(2,'0') + ':' + String(tot%60).padStart(2,'0'));
+  }
+  output.textContent = 'Orari: ' + orari.join(' · ');
+}
+
+// patch aggiornaOrari per custom-wrap display flex
+const _origAggiornaOrari = aggiornaOrari;
+// sostituisce la gestione del custom-wrap per usare flex
+(function patchAggiornaOrari() {
+  const orig = window.aggiornaOrari;
+  window.aggiornaOrari = function() {
+    orig();
+    const freq = document.getElementById('freq-select');
+    const cw = document.getElementById('custom-wrap');
+    if (freq && cw && freq.value === 'custom') {
+      cw.style.display = 'flex';
+      aggiornaOrariCustom();
+    }
+  };
+})();
+
+// wrap goTo per renderHome dinamico
+const _origGoTo = goTo;
+window.goTo = function(name) {
+  if (name === 'home') {
+    renderHome(); // prima del goTo così i nuovi elementi ci sono per lo scroll
+  }
+  _origGoTo(name);
+};
+
+window.addEventListener('load', () => {
+  renderHome();
+  aggiornaOrariCustom();
+});
+
+// ============================================================
+// CUSTOM PICKER ENGINE
+// ============================================================
+(function(){
+  // State
+  let _fieldId = null;   // hidden input id
+  let _mode = 'date';    // 'date' | 'datetime' | 'time'
+  let _onChangeCb = null;// optional callback after confirm (for time-only)
+  let _calYear, _calMonth;
+  let _selDate = null;   // selected yyyy-mm-dd string
+  let _selH = 9, _selM = 0;
+  let _ymMode = false;
+  let _ymYear;           // decade anchor
+  let _ymSelYear = null;
+  let _scrollTimers = {};
+
+  const IT_MONTHS = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
+    'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+  const IT_MONTHS_S = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+
+  // ---- PUBLIC API ----
+  window.openDatePicker = function(fieldId, mode) {
+    _fieldId = fieldId;
+    _mode = mode || 'date'; // 'date' or 'datetime'
+    _onChangeCb = null;
+    _ymMode = false;
+
+    const hidden = document.getElementById(fieldId);
+    const val = hidden ? hidden.value : '';
+    const now = new Date();
+    if (val) {
+      const d = new Date(val);
+      _calYear  = d.getFullYear();
+      _calMonth = d.getMonth();
+      _selDate  = val.split('T')[0];
+      _selH = d.getHours();
+      _selM = d.getMinutes();
+    } else {
+      _calYear  = now.getFullYear();
+      _calMonth = now.getMonth();
+      _selDate  = null;
+      _selH = 9; _selM = 0;
+    }
+
+    document.getElementById('picker-title').textContent =
+      mode === 'datetime' ? 'Seleziona data e ora' : 'Seleziona data';
+    document.getElementById('picker-cal-section').style.display = '';
+    document.getElementById('picker-time-section').style.display = (mode !== 'datetime') ? 'none' : '';
+    document.getElementById('ym-picker').style.display = 'none';
+
+    renderCalendar(_calYear, _calMonth);
+    if (mode === 'datetime') initTimeWheels(_selH, _selM);
+
+    showOverlay();
+  };
+
+  window.openTimePicker = function(fieldId, onChangeCb) {
+    _fieldId = fieldId;
+    _mode = 'time';
+    _onChangeCb = onChangeCb || null;
+    _ymMode = false;
+
+    const hidden = document.getElementById(fieldId);
+    const val = hidden ? hidden.value : '09:00';
+    const parts = (val || '09:00').split(':');
+    _selH = parseInt(parts[0], 10) || 0;
+    _selM = parseInt(parts[1], 10) || 0;
+    _selDate = null;
+
+    document.getElementById('picker-title').textContent = 'Seleziona orario';
+    document.getElementById('picker-cal-section').style.display = 'none';
+    document.getElementById('picker-time-section').style.display = '';
+    document.getElementById('ym-picker').style.display = 'none';
+
+    initTimeWheels(_selH, _selM);
+    showOverlay();
+  };
+
+  // Called from renderNotifBlock to open time picker for a notif entry
+  window.openNotifTimePicker = function(nid, formId) {
+    const notifList = notifStati[formId] || [];
+    const n = notifList.find(x => x.id === nid);
+    if (!n) return;
+    const parts = (n.time || '09:00').split(':');
+    _selH = parseInt(parts[0], 10) || 0;
+    _selM = parseInt(parts[1], 10) || 0;
+    _mode = 'time';
+    _fieldId = null;
+    _selDate = null;
+    _onChangeCb = function(h, m) {
+      n.time = pad2(h) + ':' + pad2(m);
+      // update label button
+      const btn = document.querySelector('[data-notif-timebtn="'+nid+'"]');
+      if (btn) btn.querySelector('span').textContent = n.time;
+    };
+
+    document.getElementById('picker-title').textContent = 'Seleziona orario';
+    document.getElementById('picker-cal-section').style.display = 'none';
+    document.getElementById('picker-time-section').style.display = '';
+    document.getElementById('ym-picker').style.display = 'none';
+
+    initTimeWheels(_selH, _selM);
+    showOverlay();
+  };
+
+  window.closePicker = function() {
+    hideOverlay();
+  };
+
+  window.confirmPicker = function() {
+    if (_mode === 'time') {
+      const h = _selH, m = _selM;
+      const timeStr = pad2(h) + ':' + pad2(m);
+      if (_fieldId) {
+        const hidden = document.getElementById(_fieldId);
+        if (hidden) hidden.value = timeStr;
+        const lbl = document.getElementById(_fieldId + '-lbl');
+        if (lbl) { lbl.textContent = timeStr; markFilled(_fieldId + '-btn'); }
+      }
+      if (_onChangeCb) _onChangeCb(h, m);
+      hideOverlay();
+      return;
+    }
+
+    // date or datetime
+    if (!_selDate) { hideOverlay(); return; }
+    let iso = _selDate;
+    if (_mode === 'datetime') iso += 'T' + pad2(_selH) + ':' + pad2(_selM);
+
+    const hidden = document.getElementById(_fieldId);
+    if (hidden) hidden.value = iso;
+    const lbl = document.getElementById(_fieldId + '-lbl');
+    if (lbl) {
+      if (_mode === 'datetime') {
+        const d = new Date(iso);
+        lbl.textContent = fmtLbl(d, true);
+      } else {
+        const d = new Date(_selDate + 'T12:00');
+        lbl.textContent = fmtLbl(d, false);
+      }
+      markFilled(_fieldId + '-btn');
+    }
+    hideOverlay();
+  };
+
+  // ---- CALENDAR ----
+  window.renderCalendar = function(year, month) {
+    _calYear = year; _calMonth = month;
+    document.getElementById('cal-month-label').textContent =
+      IT_MONTHS[month] + ' ' + year;
+
+    const grid = document.getElementById('cal-grid');
+    grid.innerHTML = '';
+    const firstDow = new Date(year, month, 1).getDay(); // 0=sun
+    const offset = (firstDow + 6) % 7; // mon=0
+    const daysInMonth = new Date(year, month+1, 0).getDate();
+    const today = new Date();
+    const todayStr = isoDate(today.getFullYear(), today.getMonth(), today.getDate());
+
+    for (let i = 0; i < offset; i++) {
+      const empty = document.createElement('div');
+      empty.className = 'cal-cell empty';
+      grid.appendChild(empty);
+    }
+    for (let d = 1; d <= daysInMonth; d++) {
+      const ds = isoDate(year, month, d);
+      const cell = document.createElement('div');
+      cell.className = 'cal-cell';
+      if (ds === todayStr) cell.classList.add('today');
+      if (ds === _selDate) cell.classList.add('selected');
+      cell.textContent = d;
+      cell.onclick = () => selectDay(ds);
+      grid.appendChild(cell);
+    }
+  };
+
+  function selectDay(ds) {
+    _selDate = ds;
+    renderCalendar(_calYear, _calMonth);
+  }
+
+  window.calStep = function(dir) {
+    _calMonth += dir;
+    if (_calMonth < 0) { _calMonth = 11; _calYear--; }
+    if (_calMonth > 11) { _calMonth = 0; _calYear++; }
+    renderCalendar(_calYear, _calMonth);
+    if (_ymMode) { _ymMode = false; document.getElementById('ym-picker').style.display = 'none'; }
+  };
+
+  // ---- YEAR/MONTH ROLLER ----
+  // _ymStep: 'months' = mostra mesi, 'years' = mostra anni
+  let _ymStep = 'months';
+
+  window.toggleYearMonthPicker = function() {
+    // Tocco titolo: apre step MESI
+    _ymStep = 'months';
+    _ymSelYear = _calYear;
+    showYMPicker();
+    renderMonthStep();
+  };
+
+  window.ymDecade = function(dir) {
+    _ymYear += dir * 10;
+    renderYearStep();
+  };
+
+  function showYMPicker() {
+    document.getElementById('ym-picker').style.display = '';
+    const days = document.getElementById('cal-days-section');
+    if (days) days.style.display = 'none';
+  }
+
+  function hideYMPicker() {
+    document.getElementById('ym-picker').style.display = 'none';
+    const days = document.getElementById('cal-days-section');
+    if (days) days.style.display = '';
+  }
+
+  // Step 1: griglia MESI
+  function renderMonthStep() {
+    _ymStep = 'months';
+    document.getElementById('ym-decade-nav').style.display = 'none';
+    document.getElementById('ym-year-grid').style.display = 'none';
+    document.getElementById('ym-step-title').textContent = 'Scegli il mese';
+    const mg = document.getElementById('ym-month-grid');
+    mg.style.display = '';
+    mg.innerHTML = '';
+    IT_MONTHS.forEach((m, i) => {
+      const b = document.createElement('button');
+      b.textContent = m;
+      b.className = 'ym-month-btn' + (i === _calMonth && _calYear === _ymSelYear ? ' active' : '');
+      b.onclick = () => {
+        _calMonth = i;
+        renderYearStep();
+      };
+      mg.appendChild(b);
+    });
+  }
+
+  // Step 2: griglia ANNI
+  function renderYearStep() {
+    _ymStep = 'years';
+    const curY = new Date().getFullYear();
+    if (!_ymYear || _ymYear < curY) _ymYear = curY;
+    document.getElementById('ym-decade-nav').style.display = '';
+    document.getElementById('ym-month-grid').style.display = 'none';
+    document.getElementById('ym-step-title').textContent = "Scegli l'anno";
+    const startY = Math.max(_ymYear, curY);
+    document.getElementById('ym-decade-label').textContent = startY + '–' + (startY + 9);
+    const yg = document.getElementById('ym-year-grid');
+    yg.style.display = '';
+    yg.innerHTML = '';
+    for (let y = startY; y < startY + 10; y++) {
+      const b = document.createElement('button');
+      b.textContent = y;
+      b.className = 'ym-year-btn' + (y === _ymSelYear ? ' active' : '');
+      b.onclick = () => {
+        _calYear = y;
+        _ymSelYear = y;
+        hideYMPicker();
+        renderCalendar(_calYear, _calMonth);
+      };
+      yg.appendChild(b);
+    }
+  }
+
+  // ---- TIME WHEELS ----
+  function initTimeWheels(h, m) {
+    populateTimeCol('time-col-h', 24, h);
+    populateTimeCol('time-col-m', 60, m);
+    _selH = h; _selM = m;
+  }
+
+  function populateTimeCol(colId, count, selectedVal) {
+    const col = document.getElementById(colId);
+    // remove existing items (keep pads)
+    const pads = col.querySelectorAll('.time-col-pad');
+    col.innerHTML = '';
+    col.appendChild(pads[0] ? pads[0].cloneNode() : makePad());
+    for (let i = 0; i < count; i++) {
+      const item = document.createElement('div');
+      item.className = 'time-col-item';
+      item.textContent = pad2(i);
+      item.dataset.val = i;
+      col.appendChild(item);
+    }
+    col.appendChild(makePad());
+    // scroll to selected after paint
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => scrollToVal(col, selectedVal));
+    });
+  }
+
+  function makePad() {
+    const d = document.createElement('div');
+    d.className = 'time-col-pad';
+    return d;
+  }
+
+  function scrollToVal(col, val) {
+    const items = col.querySelectorAll('.time-col-item');
+    if (items.length === 0) return;
+    const itemH = items[0].offsetHeight || 52;
+    col.scrollTop = val * itemH;
+  }
+
+  window.onTimeScroll = function(col, which) {
+    clearTimeout(_scrollTimers[which]);
+    _scrollTimers[which] = setTimeout(() => {
+      const items = col.querySelectorAll('.time-col-item');
+      if (!items.length) return;
+      const itemH = items[0].offsetHeight || 52;
+      const idx = Math.round(col.scrollTop / itemH);
+      const safeIdx = Math.max(0, Math.min(idx, items.length - 1));
+      col.scrollTop = safeIdx * itemH;
+      if (which === 'h') _selH = safeIdx;
+      else _selM = safeIdx;
+    }, 150);
+  };
+
+  // ---- HELPERS ----
+  function showOverlay() {
+    const ov = document.getElementById('picker-overlay');
+    ov.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    requestAnimationFrame(() => requestAnimationFrame(() => ov.classList.add('open')));
+  }
+
+  function hideOverlay() {
+    const ov = document.getElementById('picker-overlay');
+    ov.classList.remove('open');
+    document.body.style.overflow = '';
+    setTimeout(() => { ov.style.display = 'none'; }, 280);
+  }
+
+  function isoDate(y, m, d) {
+    return y + '-' + pad2(m+1) + '-' + pad2(d);
+  }
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+
+  function markFilled(btnId) {
+    const btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('filled');
+  }
+
+  function fmtLbl(d, withTime) {
+    const giorni = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
+    const mesi = IT_MONTHS_S;
+    let s = giorni[d.getDay()] + ' ' + d.getDate() + ' ' + mesi[d.getMonth()] + ' ' + d.getFullYear();
+    if (withTime) s += ' · ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    return s;
+  }
+})();
+
+</script>
+
+
+<!-- ============================================================
+     CUSTOM DATE / TIME PICKER OVERLAY
+     ============================================================ -->
+<div id="picker-overlay" class="picker-overlay" style="display:none"
+     onclick="if(event.target===this)closePicker()">
+  <div class="picker-sheet">
+    <div class="picker-handle"></div>
+    <div class="picker-header">
+      <button class="picker-cancel" onclick="closePicker()">Annulla</button>
+      <span id="picker-title" class="picker-title">Seleziona data</span>
+      <button class="picker-confirm" onclick="confirmPicker()">OK</button>
+    </div>
+
+    <!-- CALENDAR -->
+    <div id="picker-cal-section">
+      <div class="cal-nav">
+        <button class="cal-nav-btn" onclick="calStep(-1)">&#8249;</button>
+        <button class="cal-month-btn" id="cal-month-label" onclick="toggleYearMonthPicker()"></button>
+        <button class="cal-nav-btn" onclick="calStep(1)">&#8250;</button>
+      </div>
+
+      <!-- Anno/Mese selector (visibile quando si tocca il titolo mese) -->
+      <div id="ym-picker" class="ym-picker" style="display:none">
+        <div class="ym-step-title" id="ym-step-title">Scegli il mese</div>
+        <div class="ym-decade-nav" id="ym-decade-nav" style="display:none">
+          <button onclick="ymDecade(-1)">&#8249;</button>
+          <span id="ym-decade-label"></span>
+          <button onclick="ymDecade(1)">&#8250;</button>
+        </div>
+        <div id="ym-month-grid" class="ym-month-grid"></div>
+        <div id="ym-year-grid" class="ym-year-grid" style="display:none"></div>
+      </div>
+
+      <!-- Griglia giorni (nascosta quando si sceglie anno/mese) -->
+      <div id="cal-days-section">
+        <div class="cal-weekdays">
+          <span>Lu</span><span>Ma</span><span>Me</span><span>Gi</span><span>Ve</span><span>Sa</span><span>Do</span>
+        </div>
+        <div id="cal-grid" class="cal-grid"></div>
+      </div>
+    </div>
+
+    <!-- TIME WHEELS -->
+    <div id="picker-time-section" style="display:none">
+      <div class="time-picker-wrap">
+        <div class="time-col-wrap">
+          <div class="time-col" id="time-col-h" onscroll="onTimeScroll(this,'h')"></div>
+        </div>
+        <span class="time-sep">:</span>
+        <div class="time-col-wrap">
+          <div class="time-col" id="time-col-m" onscroll="onTimeScroll(this,'m')"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body></html>
