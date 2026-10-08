@@ -165,16 +165,8 @@ function calcolaTimestampNotifica(desc, dataEvt, time) {
   return d.getTime();
 }
 
-// Ri-schedula ogni volta che si salva un evento
-const _origSalvaEventiLS = typeof salvaEventiLS === 'function' ? salvaEventiLS : null;
-// Patch dopo che salvaEventiLS è definita (viene chiamata dopo ogni salvataggio)
-document.addEventListener('DOMContentLoaded', () => {
-  const primoAvvio = !localStorage.getItem('agendamia_onboarding_done');
-  if (primoAvvio) {
-    inizializzaBenvenuto();
-    goTo('benvenuto');
-  }
-});
+// NB: goTo è definita nel secondo <script> — il controllo primo avvio
+// viene eseguito lì, dopo che tutte le funzioni sono disponibili.
 
 </script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Nunito:wght@400;600;700;800&display=swap">
@@ -3615,6 +3607,22 @@ window.addEventListener('load', () => {
     let s = giorni[d.getDay()] + ' ' + d.getDate() + ' ' + mesi[d.getMonth()] + ' ' + d.getFullYear();
     if (withTime) s += ' · ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
     return s;
+  }
+})();
+
+// ── Primo avvio / onboarding ──────────────────────────────────
+// Eseguito qui perché goTo() è definita in questo stesso script.
+(function() {
+  // Pulisce eventuali chiavi del vecchio AgendaMe per forzare il benvenuto
+  const chiaveVecchia = 'agendame_onboarding_done';
+  if (localStorage.getItem(chiaveVecchia)) {
+    localStorage.removeItem(chiaveVecchia);
+  }
+
+  const primoAvvio = !localStorage.getItem('agendamia_onboarding_done');
+  if (primoAvvio) {
+    inizializzaBenvenuto();
+    goTo('benvenuto');
   }
 })();
 
