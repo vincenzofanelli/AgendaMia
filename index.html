@@ -59,7 +59,6 @@ if ('serviceWorker' in navigator) {
 let _deferredInstallPrompt = null;
 
 window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
   _deferredInstallPrompt = e;
   document.getElementById('install-box').style.display = '';
 });
