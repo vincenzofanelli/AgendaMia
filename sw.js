@@ -50,8 +50,8 @@ function programmaNotifica({ tag, title, body, timestamp }) {
       await self.registration.showNotification(title, {
         body,
         tag,
-        icon: './icons/icon-192.png',
-        badge: './icons/icon-96.png',
+        icon: './icon-192.png',
+        badge: './icon-192.png',
         vibrate: [200, 100, 200],
         requireInteraction: false,
         data: { url: './' }
