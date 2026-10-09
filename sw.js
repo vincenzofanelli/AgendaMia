@@ -1,7 +1,7 @@
 // PromemoriaMio Service Worker v1.0
 // Gestisce notifiche locali programmate
 
-const CACHE_NAME = 'promemoriamio-v2';
+const CACHE_NAME = 'promemoriamio-v3';
 const ASSETS = ['./index.html', './manifest.json'];
 
 // ── Install ──────────────────────────────────────────────────────────────────
@@ -47,12 +47,14 @@ function programmaNotifica({ tag, title, body, timestamp }) {
   const id = setTimeout(async () => {
     timers.delete(tag);
     try {
-      await self.registration.showNotification(title, {
-        body,
+      await self.registration.showNotification(title || 'PromemoriaMio', {
+        body: body || 'Hai un impegno in programma',
         tag,
         icon: './icon-192.png',
         badge: './icon-192.png',
         vibrate: [200, 100, 200],
+        silent: false,
+        renotify: true,
         requireInteraction: false,
         data: { url: './' }
       });

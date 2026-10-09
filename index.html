@@ -2416,6 +2416,7 @@ function goTo(name) {
   next.classList.remove('hidden');
   current = name;
   if (name === 'home') {
+    renderHome();
     scrollPrimoOggi();
   }
   if (name === 'liste') {
@@ -3723,6 +3724,11 @@ if ('Notification' in window && Notification.permission === 'default') {
 // Aggiorna la home ogni minuto per spostare eventi scaduti
 setInterval(renderHome, 60000);
 setUtility('ok');
+
+// Aggiorna la home immediatamente quando l'utente torna all'app
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && current === 'home') renderHome();
+});
 
 (function() {
   // Pulisce eventuali chiavi del vecchio AgendaMe per forzare il benvenuto
