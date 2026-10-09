@@ -1465,7 +1465,7 @@ body {
 <!-- ============================================================
      SCHERMATA BENVENUTO (primo avvio)
      ============================================================ -->
-<div class="screen" id="screen-benvenuto" style="justify-content:center;align-items:center;padding:32px 24px;text-align:center">
+<div class="screen hidden" id="screen-benvenuto" style="justify-content:center;align-items:center;padding:32px 24px;text-align:center">
   <div style="font-size:3.5rem;margin-bottom:16px">📅</div>
   <h1 style="font-size:1.6rem;font-weight:800;color:var(--fg);margin-bottom:8px">PromemoriaMio</h1>
   <p style="font-size:0.95rem;color:var(--fg-2);margin-bottom:32px;line-height:1.5">
@@ -3291,7 +3291,7 @@ window.addEventListener('load', () => {
   let _onChangeCb = null;// optional callback after confirm (for time-only)
   let _calYear, _calMonth;
   let _selDate = null;   // selected yyyy-mm-dd string
-  const _nowInit = new Date(); let _selH = _nowInit.getHours(), _selM = _nowInit.getMinutes();
+  let _selH = 9, _selM = 0;
   let _ymMode = false;
   let _ymYear;           // decade anchor
   let _ymSelYear = null;
@@ -3322,7 +3322,7 @@ window.addEventListener('load', () => {
       _calYear  = now.getFullYear();
       _calMonth = now.getMonth();
       _selDate  = null;
-      const _nowDef = new Date(); _selH = _nowDef.getHours(); _selM = _nowDef.getMinutes();
+      if (mode === 'datetime') { const _nowDef = new Date(); _selH = _nowDef.getHours(); _selM = _nowDef.getMinutes(); } else { _selH = 9; _selM = 0; }
     }
 
     document.getElementById('picker-title').textContent =
