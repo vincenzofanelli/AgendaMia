@@ -30,7 +30,25 @@
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js')
-      .then(reg => { window._swReg = reg; scheduleAllNotifications(); })
+      .then(reg => {
+        window._swReg = reg;
+        // Forza aggiornamento del service worker ad ogni caricamento
+        reg.update();
+        // Attiva subito il nuovo SW senza aspettare la chiusura delle tab
+        if (reg.waiting) reg.waiting.postMessage({ tipo: 'SKIP_WAITING' });
+        reg.addEventListener('updatefound', () => {
+          const newSW = reg.installing;
+          if (newSW) {
+            newSW.addEventListener('statechange', () => {
+              if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
+                newSW.postMessage({ tipo: 'SKIP_WAITING' });
+                window.location.reload();
+              }
+            });
+          }
+        });
+        scheduleAllNotifications();
+      })
       .catch(e => console.warn('SW non registrato:', e));
   });
 }
@@ -72,18 +90,18 @@ function inizializzaBenvenuto() {
   if (isIOS) {
     icon.textContent = '🍎';
     title.textContent = 'iPhone / iPad rilevato';
-    msg.innerHTML = 'Su iOS le notifiche funzionano <strong>solo con l'app aperta</strong>.<br><br>'
-      + 'Per la migliore esperienza: tocca <strong>Condividi → Aggiungi a schermata Home</strong> in Safari.';
+    msg.innerHTML = "Su iOS le notifiche funzionano <strong>solo con l'app aperta</strong>.<br><br>"
+      + "Per la migliore esperienza: tocca <strong>Condividi → Aggiungi a schermata Home</strong> in Safari.";
   } else if (isAndroid && isChrome) {
     icon.textContent = '🔔';
     title.textContent = 'Notifiche complete disponibili';
     msg.innerHTML = 'Su Android con Chrome puoi ricevere notifiche <strong>anche con il telefono in standby</strong>.<br><br>'
-      + 'Installa l'app per attivare le notifiche.';
+      + "Installa l'app per attivare le notifiche.";
   } else {
     icon.textContent = '⚠️';
     title.textContent = 'Browser non ottimale';
     msg.innerHTML = 'Per le notifiche usa <strong>Chrome su Android</strong>.<br>'
-      + 'Su altri browser le notifiche funzionano solo con l'app aperta.';
+      + "Su altri browser le notifiche funzionano solo con l'app aperta.";
   }
 }
 

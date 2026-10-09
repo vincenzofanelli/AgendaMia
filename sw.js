@@ -1,7 +1,7 @@
-// AgendaMia Service Worker v1.0
+// AgendaMia Service Worker v1.2
 // Gestisce notifiche locali programmate
 
-const CACHE_NAME = 'agendamia-v1';
+const CACHE_NAME = 'agendamia-v2';
 const ASSETS = ['./index.html', './manifest.json'];
 
 // ── Install ──────────────────────────────────────────────────────────────────
@@ -100,6 +100,12 @@ self.addEventListener('message', e => {
     // Ping di debug
     case 'PING': {
       e.source && e.source.postMessage({ tipo: 'PONG', timers: [...timers.keys()] });
+      break;
+    }
+
+    // Forza attivazione immediata del nuovo SW
+    case 'SKIP_WAITING': {
+      self.skipWaiting();
       break;
     }
   }
