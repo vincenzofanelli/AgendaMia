@@ -39,12 +39,16 @@ if ('serviceWorker' in navigator) {
           if (newSW) {
             newSW.addEventListener('statechange', () => {
               if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
-                newSW.postMessage({ tipo: 'SKIP_WAITING' });
-                window.location.reload();
+                // Mostra banner aggiornamento invece di ricaricare in silenzio
+                mostraBannerAggiornamento(newSW);
               }
             });
           }
         });
+        // Controlla se c'è già un SW in attesa (aggiornamento scaricato ma non attivato)
+        if (reg.waiting) {
+          mostraBannerAggiornamento(reg.waiting);
+        }
         scheduleAllNotifications();
       })
       .catch(e => console.warn('SW non registrato:', e));
@@ -68,6 +72,18 @@ function installPWA() {
     _deferredInstallPrompt = null;
     document.getElementById('install-box').style.display = 'none';
   });
+}
+
+function mostraBannerAggiornamento(swWaiting) {
+  const banner = document.getElementById('update-banner');
+  if (!banner) return;
+  banner.style.display = '';
+  banner.querySelector('button').onclick = () => {
+    swWaiting.postMessage({ tipo: 'SKIP_WAITING' });
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      window.location.reload();
+    });
+  };
 }
 
 function rilevaTipoDispositivo() {
@@ -144,9 +160,9 @@ function scheduleAllNotifications() {
       let ts = calcolaTimestampNotifica(n.desc, dataEvt, n.time);
       if (!ts || ts <= ora) return;
       notifiche.push({
-        ts,
-        title: 'PromemoriaMio — ' + (extra.titolo || extra.tipo || extra.nome || 'Impegno'),
-        body: n.desc + (n.time ? ' · ' + n.time : ''),
+        timestamp: ts,
+        title: (extra.titolo || extra.tipo || extra.nome || 'Impegno'),
+        body: n.desc + (n.time ? ' alle ' + n.time : ''),
         tag: ev.id + '_' + n.id
       });
     });
@@ -1491,12 +1507,13 @@ body {
      HOME SCREEN
      ============================================================ -->
 <div class="screen" id="screen-home">
+  <!-- Banner aggiornamento disponibile -->
+  <div id="update-banner" style="display:none;background:var(--accent);color:#fff;padding:10px 16px;display:none;align-items:center;justify-content:space-between;gap:8px;font-size:0.88rem;font-weight:600">
+    <span>🔄 Nuova versione disponibile</span>
+    <button style="background:#fff;color:var(--accent);border:none;border-radius:8px;padding:6px 14px;font-weight:700;font-size:0.85rem;font-family:inherit;cursor:pointer">Aggiorna</button>
+  </div>
   <div class="header">
     <h1>PromemoriaMio</h1>
-    <button class="update-badge inactive" id="btn-update" onclick="aggiornaApp()">
-      <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-      Azzera e ricarica
-    </button>
   </div>
 
   <div class="scroll-body" id="home-list">
@@ -3652,6 +3669,9 @@ if ('Notification' in window && Notification.permission === 'default') {
 
 // ── Primo avvio / onboarding ──────────────────────────────────
 // Eseguito qui perché goTo() è definita in questo stesso script.
+// Aggiorna la home ogni minuto per spostare eventi scaduti
+setInterval(renderHome, 60000);
+
 (function() {
   // Pulisce eventuali chiavi del vecchio AgendaMe per forzare il benvenuto
   const chiaveVecchia = 'agendame_onboarding_done';
