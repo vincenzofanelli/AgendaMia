@@ -17,6 +17,16 @@
 }
 .notif-time-btn:focus { outline: none; border-color: var(--accent); }
 
+/* ── btn-utility stati ── */
+.btn-utility-warn {
+  background: #fff8d6 !important;
+  border-color: #e6c84a !important;
+  color: #8a6800 !important;
+}
+@media (prefers-color-scheme: dark) {
+  .btn-utility-warn { background: #1e1a00 !important; border-color: #6a5500 !important; color: #d4aa00 !important; }
+}
+
 </style></head><body>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -30,25 +40,21 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./sw.js')
       .then(reg => {
         window._swReg = reg;
-        // Forza aggiornamento del service worker ad ogni caricamento
         reg.update();
-        // Attiva subito il nuovo SW senza aspettare la chiusura delle tab
-        if (reg.waiting) reg.waiting.postMessage({ tipo: 'SKIP_WAITING' });
+        if (reg.waiting && navigator.serviceWorker.controller) {
+          setUtility('update');
+        }
         reg.addEventListener('updatefound', () => {
-          const newSW = reg.installing;
-          if (newSW) {
-            newSW.addEventListener('statechange', () => {
-              if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
-                // Mostra banner aggiornamento invece di ricaricare in silenzio
-                mostraBannerAggiornamento(newSW);
+          const nw = reg.installing;
+          if (nw) {
+            nw.addEventListener('statechange', () => {
+              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                setUtility('update');
               }
             });
           }
         });
-        // Controlla se c'è già un SW in attesa (aggiornamento scaricato ma non attivato)
-        if (reg.waiting) {
-          mostraBannerAggiornamento(reg.waiting);
-        }
+        setInterval(() => reg.update(), 30 * 60 * 1000);
         scheduleAllNotifications();
       })
       .catch(e => console.warn('SW non registrato:', e));
@@ -74,16 +80,43 @@ function installPWA() {
   });
 }
 
-function mostraBannerAggiornamento(swWaiting) {
-  const banner = document.getElementById('update-banner');
-  if (!banner) return;
-  banner.style.display = '';
-  banner.querySelector('button').onclick = () => {
-    swWaiting.postMessage({ tipo: 'SKIP_WAITING' });
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      window.location.reload();
-    });
-  };
+function aggiornaApp() {
+  navigator.serviceWorker.getRegistrations()
+    .then(regs => {
+      regs.forEach(r => { if (r.waiting) r.waiting.postMessage({ tipo: 'SKIP_WAITING' }); });
+      return Promise.all(regs.map(r => r.unregister()));
+    })
+    .then(() => caches.keys())
+    .then(keys => Promise.all(keys.map(k => caches.delete(k))))
+    .then(() => location.reload());
+}
+
+function setUtility(mode) {
+  const btn = document.getElementById('btn-utility');
+  if (!btn) return;
+  btn.classList.remove('btn-utility-ok', 'btn-utility-warn');
+  switch (mode) {
+    case 'update':
+      btn.textContent = '🔄 Aggiornamento disponibile — tocca per installare';
+      btn.onclick = aggiornaApp;
+      btn.classList.add('btn-utility-warn');
+      break;
+    case 'done':
+      btn.textContent = '✓ Aggiornato!';
+      btn.onclick = null;
+      btn.classList.add('btn-utility-warn');
+      setTimeout(() => setUtility('ok'), 3000);
+      break;
+    default:
+      btn.textContent = '🔄 Verifica aggiornamenti';
+      btn.onclick = () => {
+        if (window._swReg) window._swReg.update().then(() => {
+          if (window._swReg.waiting) setUtility('update');
+          else showToast('App già aggiornata ✓');
+        });
+      };
+      btn.classList.add('btn-utility-ok');
+  }
 }
 
 function rilevaTipoDispositivo() {
@@ -1507,11 +1540,6 @@ body {
      HOME SCREEN
      ============================================================ -->
 <div class="screen" id="screen-home">
-  <!-- Banner aggiornamento disponibile -->
-  <div id="update-banner" style="display:none;background:var(--accent);color:#fff;padding:10px 16px;display:none;align-items:center;justify-content:space-between;gap:8px;font-size:0.88rem;font-weight:600">
-    <span>🔄 Nuova versione disponibile</span>
-    <button style="background:#fff;color:var(--accent);border:none;border-radius:8px;padding:6px 14px;font-weight:700;font-size:0.85rem;font-family:inherit;cursor:pointer">Aggiorna</button>
-  </div>
   <div class="header">
     <h1>PromemoriaMio</h1>
   </div>
@@ -1949,6 +1977,12 @@ body {
           <div class="settings-row-value" style="line-height:1.5">Le notifiche funzionano mentre l'app è aperta o in background recente. Per risultati migliori mantieni l'app installata e non chiuderla dalla lista app.</div>
         </div>
       </div>
+    </div>
+
+    <!-- Aggiornamento app -->
+    <div class="settings-section" style="margin-bottom:24px">
+      <div class="settings-section-title">App</div>
+      <button id="btn-utility" class="btn-utility-ok" style="width:100%;padding:13px 16px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg-card);color:var(--fg);font-size:0.9rem;font-weight:600;font-family:inherit;cursor:pointer;text-align:left">🔄 Verifica aggiornamenti</button>
     </div>
 
   </div><!-- /scroll-body -->
@@ -3671,6 +3705,7 @@ if ('Notification' in window && Notification.permission === 'default') {
 // Eseguito qui perché goTo() è definita in questo stesso script.
 // Aggiorna la home ogni minuto per spostare eventi scaduti
 setInterval(renderHome, 60000);
+setUtility('ok');
 
 (function() {
   // Pulisce eventuali chiavi del vecchio AgendaMe per forzare il benvenuto
