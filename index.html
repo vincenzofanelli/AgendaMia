@@ -1411,40 +1411,24 @@ body {
   flex-shrink: 0; pointer-events: none;
 }
 .time-col-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
   flex: 1;
-  position: relative;
-  height: 210px;
-  max-width: 100px;
 }
-.time-col {
-  height: 210px;
-  overflow-y: scroll;
-  scroll-snap-type: y mandatory;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: none;
+.time-col-display {
+  font-size: 3rem;
+  font-weight: 700;
+  color: var(--accent);
+  width: 80px;
+  text-align: center;
+  padding: 8px 0;
+  background: var(--accent-bg);
+  border-radius: 12px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
 }
-.time-col::-webkit-scrollbar { display: none; }
-.time-col-pad { height: 80px; flex-shrink: 0; }
-.time-col-item {
-  height: 52px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 1.6rem; font-weight: 600;
-  color: var(--fg-3);
-  scroll-snap-align: center;
-  cursor: pointer;
-}
-/* linee highlight al centro */
-.time-col-wrap::before, .time-col-wrap::after {
-  content: '';
-  position: absolute;
-  left: 0; right: 0;
-  height: 2px;
-  background: var(--accent);
-  pointer-events: none;
-  z-index: 1;
-}
-.time-col-wrap::before { top: calc(50% - 27px); }
-.time-col-wrap::after  { top: calc(50% + 25px); }
 
 /* notif time button */
 .notif-time-btn {
@@ -3321,8 +3305,15 @@ window.addEventListener('load', () => {
     } else {
       _calYear  = now.getFullYear();
       _calMonth = now.getMonth();
-      _selDate  = null;
-      if (mode === 'datetime') { const _nowDef = new Date(); _selH = _nowDef.getHours(); _selM = _nowDef.getMinutes(); } else { _selH = 9; _selM = 0; }
+      if (mode === 'datetime') {
+        // Pre-seleziona oggi come data di default
+        _selDate = isoDate(now.getFullYear(), now.getMonth(), now.getDate());
+        _selH = now.getHours();
+        _selM = now.getMinutes();
+      } else {
+        _selDate = null;
+        _selH = 9; _selM = 0;
+      }
     }
 
     document.getElementById('picker-title').textContent =
@@ -3549,66 +3540,24 @@ window.addEventListener('load', () => {
 
   // ---- TIME WHEELS ----
   function initTimeWheels(h, m) {
-    populateTimeCol('time-col-h', 24, h);
-    populateTimeCol('time-col-m', 60, m);
     _selH = h; _selM = m;
+    updateTimeDisplay();
   }
 
-  function populateTimeCol(colId, count, selectedVal) {
-    const col = document.getElementById(colId);
-    // remove existing items (keep pads)
-    const pads = col.querySelectorAll('.time-col-pad');
-    col.innerHTML = '';
-    col.appendChild(pads[0] ? pads[0].cloneNode() : makePad());
-    for (let i = 0; i < count; i++) {
-      const item = document.createElement('div');
-      item.className = 'time-col-item';
-      item.textContent = pad2(i);
-      item.dataset.val = i;
-      col.appendChild(item);
-    }
-    col.appendChild(makePad());
-    // scroll to selected after paint
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => scrollToVal(col, selectedVal));
-    });
-  }
-
-  function makePad() {
-    const d = document.createElement('div');
-    d.className = 'time-col-pad';
-    return d;
-  }
-
-  function scrollToVal(col, val) {
-    const items = col.querySelectorAll('.time-col-item');
-    if (items.length === 0) return;
-    const itemH = items[0].offsetHeight || 52;
-    col.scrollTop = val * itemH;
+  function updateTimeDisplay() {
+    const dh = document.getElementById('time-col-h');
+    const dm = document.getElementById('time-col-m');
+    if (dh) dh.textContent = pad2(_selH);
+    if (dm) dm.textContent = pad2(_selM);
   }
 
   window.stepTime = function(which, delta) {
     if (which === 'h') {
       _selH = (_selH + delta + 24) % 24;
-      scrollToVal(document.getElementById('time-col-h'), _selH);
     } else {
       _selM = (_selM + delta + 60) % 60;
-      scrollToVal(document.getElementById('time-col-m'), _selM);
     }
-  };
-
-  window.onTimeScroll = function(col, which) {
-    clearTimeout(_scrollTimers[which]);
-    _scrollTimers[which] = setTimeout(() => {
-      const items = col.querySelectorAll('.time-col-item');
-      if (!items.length) return;
-      const itemH = items[0].offsetHeight || 52;
-      const idx = Math.round(col.scrollTop / itemH);
-      const safeIdx = Math.max(0, Math.min(idx, items.length - 1));
-      col.scrollTop = safeIdx * itemH;
-      if (which === 'h') _selH = safeIdx;
-      else _selM = safeIdx;
-    }, 150);
+    updateTimeDisplay();
   };
 
   // ---- HELPERS ----
@@ -3732,13 +3681,13 @@ if ('Notification' in window && Notification.permission === 'default') {
       <div class="time-picker-wrap">
         <div class="time-col-wrap">
           <button class="time-step-btn" onclick="stepTime('h',1)">▲</button>
-          <div class="time-col" id="time-col-h" onscroll="onTimeScroll(this,'h')"></div>
+          <div class="time-col-display" id="time-col-h">09</div>
           <button class="time-step-btn" onclick="stepTime('h',-1)">▼</button>
         </div>
         <span class="time-sep">:</span>
         <div class="time-col-wrap">
           <button class="time-step-btn" onclick="stepTime('m',1)">▲</button>
-          <div class="time-col" id="time-col-m" onscroll="onTimeScroll(this,'m')"></div>
+          <div class="time-col-display" id="time-col-m">00</div>
           <button class="time-step-btn" onclick="stepTime('m',-1)">▼</button>
         </div>
       </div>
