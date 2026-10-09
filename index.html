@@ -3010,14 +3010,21 @@ function dataEvento(ev) {
 function classificaEvento(ev) {
   const d = dataEvento(ev);
   if (!d) return 'futuro';
+  const ora = new Date();
   const oggi = new Date(); oggi.setHours(0,0,0,0);
   const domani = new Date(oggi); domani.setDate(domani.getDate()+1);
   const sett = new Date(oggi); sett.setDate(sett.getDate()+7);
-  const data = new Date(d); data.setHours(0,0,0,0);
-  if (data < oggi) return 'sospeso';
-  if (data.getTime() === oggi.getTime()) return 'oggi';
-  if (data.getTime() === domani.getTime()) return 'domani';
-  if (data <= sett) return 'settimana';
+  const data = new Date(d);
+  const dataGiorno = new Date(data); dataGiorno.setHours(0,0,0,0);
+  // Se l'evento ha orario (datetime), considera scaduto solo se l'ora è già passata
+  if (d.includes('T')) {
+    if (data < ora) return 'sospeso';
+  } else {
+    if (dataGiorno < oggi) return 'sospeso';
+  }
+  if (dataGiorno.getTime() === oggi.getTime()) return 'oggi';
+  if (dataGiorno.getTime() === domani.getTime()) return 'domani';
+  if (dataGiorno <= sett) return 'settimana';
   return 'futuro';
 }
 
