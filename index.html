@@ -2410,16 +2410,18 @@ let current = 'home';
 
 function goTo(name) {
   if (!screens[name]) return;
-  // Permetti la stessa schermata solo se viene da apriEvento (gestito lì)
-  if (name === current) return;
   const prev = document.getElementById(screens[current]);
   const next = document.getElementById(screens[name]);
-  if (prev) prev.classList.add('hidden');
+  if (prev && name !== current) prev.classList.add('hidden');
   if (next) next.classList.remove('hidden');
   current = name;
   // Aggiunge uno stato history per intercettare il back Android
   if (name !== 'home') {
     history.pushState({ screen: name }, '');
+  }
+  // Tornare a home o a nuovo significa annullare qualsiasi modifica in corso
+  if (name === 'home' || name === 'nuovo') {
+    eventoInModifica = null;
   }
   if (name === 'home') {
     renderHome();
