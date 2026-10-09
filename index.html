@@ -433,6 +433,10 @@ body {
   cursor: pointer;
   transition: box-shadow 0.15s;
   position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: rgba(0,0,0,0.05);
 }
 .event-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.07); }
 
@@ -444,13 +448,14 @@ body {
   margin-top: 5px;
 }
 
-.event-body { flex: 1; min-width: 0; }
+.event-body { flex: 1; min-width: 0; user-select: none; -webkit-user-select: none; }
 .event-title {
   font-size: 0.95rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: none;
 }
 .event-meta {
   display: flex;
