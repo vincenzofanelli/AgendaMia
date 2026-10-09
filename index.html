@@ -2409,12 +2409,18 @@ const screens = {
 let current = 'home';
 
 function goTo(name) {
-  if (!screens[name] || name === current) return;
+  if (!screens[name]) return;
+  // Permetti la stessa schermata solo se viene da apriEvento (gestito lì)
+  if (name === current) return;
   const prev = document.getElementById(screens[current]);
   const next = document.getElementById(screens[name]);
-  prev.classList.add('hidden');
-  next.classList.remove('hidden');
+  if (prev) prev.classList.add('hidden');
+  if (next) next.classList.remove('hidden');
   current = name;
+  // Aggiunge uno stato history per intercettare il back Android
+  if (name !== 'home') {
+    history.pushState({ screen: name }, '');
+  }
   if (name === 'home') {
     renderHome();
     scrollPrimoOggi();
@@ -2435,7 +2441,11 @@ function goTo(name) {
     'form-generico':  'generico',
     'form-acquisti':  'acquisti',
   };
-  if (formMap[name]) initNotif(formMap[name]);
+  if (formMap[name]) {
+    // Se non siamo in modifica, resetta il form prima di mostrarlo
+    if (!eventoInModifica) resetForm(formMap[name]);
+    initNotif(formMap[name]);
+  }
 }
 
 function showToast(msg) {
@@ -3311,7 +3321,24 @@ function resetForm(cat) {
     generico: ['generico-titolo','generico-data','generico-luogo','generico-note'],
     acquisti: ['acquisti-titolo','acquisti-data','acquisti-note'],
   };
-  (ids[cat] || []).forEach(id => { const el = document.getElementById(id); if (el) { el.value = ''; if (el.tagName === 'SELECT') el.selectedIndex = 0; } });
+  const defaultLbl = {
+    'visite-data': 'Scegli data e ora',
+    'farmaci-data': 'Scegli data',
+    'ricorrenze-data': 'Scegli data',
+    'documenti-data': 'Scegli data',
+    'auto-data': 'Scegli data',
+    'generico-data': 'Scegli data e ora',
+    'acquisti-data': 'Scegli data',
+  };
+  (ids[cat] || []).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.value = ''; if (el.tagName === 'SELECT') el.selectedIndex = 0; }
+    // Resetta anche il pulsante/label visivo della data
+    const lbl = document.getElementById(id + '-lbl');
+    if (lbl && defaultLbl[id]) lbl.textContent = defaultLbl[id];
+    const btn = document.getElementById(id + '-btn');
+    if (btn) btn.classList.remove('filled');
+  });
   delete notifStati[cat]; // forza reinit defaults al prossimo accesso
 }
 
@@ -3741,18 +3768,19 @@ document.addEventListener('visibilitychange', () => {
 
 // Tasto back del telefono (Android): riporta alla home e sincronizza current
 window.addEventListener('popstate', () => {
-  if (current !== 'home') {
-    // Nascondi la schermata corrente
-    const prevEl = document.getElementById(screens[current]);
-    if (prevEl) prevEl.classList.add('hidden');
-    current = 'home';
-    const homeEl = document.getElementById(screens['home']);
-    if (homeEl) homeEl.classList.remove('hidden');
-    renderHome();
-    scrollPrimoOggi();
-  }
+  // Qualunque schermata si stia mostrando, torna alla home
+  const prevEl = document.getElementById(screens[current]);
+  if (prevEl) prevEl.classList.add('hidden');
+  current = 'home';
+  eventoInModifica = null;
+  const homeEl = document.getElementById(screens['home']);
+  if (homeEl) homeEl.classList.remove('hidden');
+  renderHome();
+  scrollPrimoOggi();
+  // Mantieni sempre uno stato in history per il prossimo back
+  history.pushState(null, '');
 });
-// Aggiungi uno stato iniziale per intercettare il primo back
+// Stato iniziale: così il primo back genera popstate invece di uscire
 history.pushState(null, '');
 
 (function() {
