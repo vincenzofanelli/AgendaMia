@@ -1387,6 +1387,17 @@ body {
 .ym-month-btn { grid-column: span 1; }
 
 /* ---- TIME PICKER (rulli scroll) ---- */
+.time-step-btn {
+  background: none;
+  border: none;
+  font-size: 1.1rem;
+  color: var(--accent);
+  padding: 4px 12px;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.time-step-btn:active { opacity: 0.6; }
 .time-picker-wrap {
   display: flex;
   justify-content: center;
@@ -3280,7 +3291,7 @@ window.addEventListener('load', () => {
   let _onChangeCb = null;// optional callback after confirm (for time-only)
   let _calYear, _calMonth;
   let _selDate = null;   // selected yyyy-mm-dd string
-  let _selH = 9, _selM = 0;
+  const _nowInit = new Date(); let _selH = _nowInit.getHours(), _selM = _nowInit.getMinutes();
   let _ymMode = false;
   let _ymYear;           // decade anchor
   let _ymSelYear = null;
@@ -3311,7 +3322,7 @@ window.addEventListener('load', () => {
       _calYear  = now.getFullYear();
       _calMonth = now.getMonth();
       _selDate  = null;
-      _selH = 9; _selM = 0;
+      const _nowDef = new Date(); _selH = _nowDef.getHours(); _selM = _nowDef.getMinutes();
     }
 
     document.getElementById('picker-title').textContent =
@@ -3576,6 +3587,16 @@ window.addEventListener('load', () => {
     col.scrollTop = val * itemH;
   }
 
+  window.stepTime = function(which, delta) {
+    if (which === 'h') {
+      _selH = (_selH + delta + 24) % 24;
+      scrollToVal(document.getElementById('time-col-h'), _selH);
+    } else {
+      _selM = (_selM + delta + 60) % 60;
+      scrollToVal(document.getElementById('time-col-m'), _selM);
+    }
+  };
+
   window.onTimeScroll = function(col, which) {
     clearTimeout(_scrollTimers[which]);
     _scrollTimers[which] = setTimeout(() => {
@@ -3636,6 +3657,13 @@ function aggiornaApp() {
     .then(() => caches.keys())
     .then(keys => Promise.all(keys.map(k => caches.delete(k))))
     .then(() => location.reload(true));
+}
+
+// ── Permesso notifiche all'avvio (indipendente dall'onboarding) ────────
+if ('Notification' in window && Notification.permission === 'default') {
+  Notification.requestPermission().then(perm => {
+    if (perm === 'granted') scheduleAllNotifications();
+  });
 }
 
 // ── Primo avvio / onboarding ──────────────────────────────────
@@ -3703,11 +3731,15 @@ function aggiornaApp() {
     <div id="picker-time-section" style="display:none">
       <div class="time-picker-wrap">
         <div class="time-col-wrap">
+          <button class="time-step-btn" onclick="stepTime('h',1)">▲</button>
           <div class="time-col" id="time-col-h" onscroll="onTimeScroll(this,'h')"></div>
+          <button class="time-step-btn" onclick="stepTime('h',-1)">▼</button>
         </div>
         <span class="time-sep">:</span>
         <div class="time-col-wrap">
+          <button class="time-step-btn" onclick="stepTime('m',1)">▲</button>
           <div class="time-col" id="time-col-m" onscroll="onTimeScroll(this,'m')"></div>
+          <button class="time-step-btn" onclick="stepTime('m',-1)">▼</button>
         </div>
       </div>
     </div>
