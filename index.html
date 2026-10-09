@@ -3181,7 +3181,16 @@ function apriEvento(id) {
   if (!ev) return;
   eventoInModifica = id;
   caricaFormEvento(ev);
-  goTo('form-' + ev.categoria);
+  // Forza la navigazione anche se current è già lo stesso form
+  // (può succedere se si torna alla home senza passare per 'nuovo')
+  const target = 'form-' + ev.categoria;
+  if (current === target) {
+    // siamo già sul form giusto ma con dati vecchi: nascondi/mostra per resettare scroll
+    const el = document.getElementById(screens[target]);
+    if (el) { el.classList.add('hidden'); setTimeout(() => el.classList.remove('hidden'), 0); }
+  } else {
+    goTo(target);
+  }
 }
 
 function caricaFormEvento(ev) {
@@ -3729,6 +3738,22 @@ setUtility('ok');
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && current === 'home') renderHome();
 });
+
+// Tasto back del telefono (Android): riporta alla home e sincronizza current
+window.addEventListener('popstate', () => {
+  if (current !== 'home') {
+    // Nascondi la schermata corrente
+    const prevEl = document.getElementById(screens[current]);
+    if (prevEl) prevEl.classList.add('hidden');
+    current = 'home';
+    const homeEl = document.getElementById(screens['home']);
+    if (homeEl) homeEl.classList.remove('hidden');
+    renderHome();
+    scrollPrimoOggi();
+  }
+});
+// Aggiungi uno stato iniziale per intercettare il primo back
+history.pushState(null, '');
 
 (function() {
   // Pulisce eventuali chiavi del vecchio AgendaMe per forzare il benvenuto
