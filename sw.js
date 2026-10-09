@@ -1,7 +1,7 @@
-// AgendaMia Service Worker v1.2
+// PromemoriaMio Service Worker v1.3
 // Gestisce notifiche locali programmate
 
-const CACHE_NAME = 'agendamia-v2';
+const CACHE_NAME = 'promemoriamio-v1';
 const ASSETS = ['./index.html', './manifest.json'];
 
 // ── Install ──────────────────────────────────────────────────────────────────
@@ -30,7 +30,6 @@ self.addEventListener('fetch', e => {
 });
 
 // ── Notifiche programmate ─────────────────────────────────────────────────────
-// Struttura: Map<tag, timeoutId>
 const timers = new Map();
 
 function cancellaTimer(tag) {
@@ -41,10 +40,9 @@ function cancellaTimer(tag) {
 }
 
 function programmaNotifica({ tag, title, body, timestamp }) {
-  cancellaTimer(tag); // evita duplicati
-
+  cancellaTimer(tag);
   const delay = timestamp - Date.now();
-  if (delay <= 0) return; // già passata
+  if (delay <= 0) return;
 
   const id = setTimeout(async () => {
     timers.delete(tag);
@@ -59,7 +57,6 @@ function programmaNotifica({ tag, title, body, timestamp }) {
         data: { url: './' }
       });
     } catch (err) {
-      // showNotification può fallire se il permesso è stato revocato
       console.warn('[SW] showNotification error:', err);
     }
   }, delay);
@@ -73,21 +70,14 @@ self.addEventListener('message', e => {
   if (!msg || !msg.tipo) return;
 
   switch (msg.tipo) {
-    // Rimpiazza TUTTE le notifiche programmate
-    // Payload: { tipo: 'SCHEDULE_NOTIFICHE', notifiche: [ {tag, title, body, timestamp}, … ] }
     case 'SCHEDULE_NOTIFICHE': {
-      // Cancella tutti i timer esistenti
       for (const [tag] of timers) cancellaTimer(tag);
-
       const lista = Array.isArray(msg.notifiche) ? msg.notifiche : [];
       lista.forEach(n => {
         if (n.tag && n.title && n.timestamp) programmaNotifica(n);
       });
       break;
     }
-
-    // Cancella una singola notifica per tag
-    // Payload: { tipo: 'CANCEL_NOTIFICA', tag: '...' }
     case 'CANCEL_NOTIFICA': {
       if (msg.tag) {
         cancellaTimer(msg.tag);
@@ -96,14 +86,10 @@ self.addEventListener('message', e => {
       }
       break;
     }
-
-    // Ping di debug
     case 'PING': {
       e.source && e.source.postMessage({ tipo: 'PONG', timers: [...timers.keys()] });
       break;
     }
-
-    // Forza attivazione immediata del nuovo SW
     case 'SKIP_WAITING': {
       self.skipWaiting();
       break;
@@ -118,11 +104,9 @@ self.addEventListener('notificationclick', e => {
 
   e.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
-      // Se c'è già una finestra aperta, portala in primo piano
       for (const client of clients) {
         if ('focus' in client) return client.focus();
       }
-      // Altrimenti apri una nuova finestra
       if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
     })
   );
