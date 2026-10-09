@@ -80,15 +80,19 @@ function installPWA() {
   });
 }
 
-function aggiornaApp() {
-  navigator.serviceWorker.getRegistrations()
-    .then(regs => {
-      regs.forEach(r => { if (r.waiting) r.waiting.postMessage({ tipo: 'SKIP_WAITING' }); });
-      return Promise.all(regs.map(r => r.unregister()));
-    })
-    .then(() => caches.keys())
-    .then(keys => Promise.all(keys.map(k => caches.delete(k))))
-    .then(() => location.reload());
+function aggiornaInfoVersione() {
+  const el = document.getElementById('app-version-info');
+  if (!el) return;
+  const swStato = navigator.serviceWorker && navigator.serviceWorker.controller
+    ? '✅ attivo' : '⚠️ non attivo';
+  if ('caches' in window) {
+    caches.keys().then(keys => {
+      const cache = keys.filter(k => k.startsWith('promemoriamio')).join(', ') || '—';
+      el.innerHTML = 'Cache: <strong>' + cache + '</strong><br>SW: ' + swStato;
+    });
+  } else {
+    el.innerHTML = 'Cache: non disponibile<br>SW: ' + swStato;
+  }
 }
 
 function setUtility(mode) {
@@ -1983,6 +1987,9 @@ body {
     <div class="settings-section" style="margin-bottom:24px">
       <div class="settings-section-title">App</div>
       <button id="btn-utility" class="btn-utility-ok" style="width:100%;padding:13px 16px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg-card);color:var(--fg);font-size:0.9rem;font-weight:600;font-family:inherit;cursor:pointer;text-align:left">🔄 Verifica aggiornamenti</button>
+      <div id="app-version-info" style="margin-top:10px;padding:10px 14px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);font-size:0.78rem;color:var(--fg-2);line-height:1.8;font-family:ui-monospace,monospace">
+        Cache: —<br>SW: —
+      </div>
     </div>
 
   </div><!-- /scroll-body -->
@@ -2413,6 +2420,9 @@ function goTo(name) {
   }
   if (name === 'liste') {
     renderListe();
+  }
+  if (name === 'utente') {
+    aggiornaInfoVersione();
   }
   // init blocchi notifiche
   const formMap = {
